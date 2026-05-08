@@ -237,7 +237,7 @@ The `scripts/sample_dataset.py` utility builds a smaller dataset directory by sa
 
 ## Example: Sketchwave Style (single-image style LoRA)
 
-Single-image LoRA training, but for a style instead of a specific subject. One training image, one caption, and the LoRA picks up an entire visual vocabulary.
+Training a style LoRA from a single image. One training image, one caption, and the LoRA picks up an entire visual vocabulary.
 
 Sketchwave is a specific look: sketchy graphite-style linework over warm cream paper, with restricted earthy palettes (olive-green, ochre, wine-red, sepia) and slightly painterly shading. There's one training image, a portrait. The goal is for the LoRA to apply the look to anything the base model can paint, including subjects with nothing in common with the portrait.
 
