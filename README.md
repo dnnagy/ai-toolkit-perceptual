@@ -12,9 +12,9 @@ An extension of [AI Toolkit by Ostris](https://github.com/ostris/ai-toolkit) tha
 - [Training Metrics](#training-metrics): what gets logged each step
 - [Training Previews](#training-previews): what each anchor saves to disk
 - [Dataset-Tools UI](#dataset-tools-ui): preflight passes for masks, depth, faces
-- [Example: Handsome Squidward (single-image LoRA)](#example-handsome-squidward-single-image-lora)
 - [Example: Sketchwave Style (single-image style LoRA)](#example-sketchwave-style-single-image-style-lora)
 - [Example: Yoshitaka Amano Style (small-dataset style LoRA)](#example-yoshitaka-amano-style-small-dataset-style-lora)
+- [Example: Handsome Squidward (single-image LoRA)](#example-handsome-squidward-single-image-lora)
 - [Configuration Reference](#configuration-reference): every extension-specific config option
 - [Upstream: AI Toolkit by Ostris](#upstream-ai-toolkit-by-ostris)
 - [Installation](#installation)
@@ -235,62 +235,9 @@ All three run as non-blocking background jobs. Start them and come back when the
 
 The `scripts/sample_dataset.py` utility builds a smaller dataset directory by sampling N random images (with their captions) from a larger source. Useful for building reg sets, running ablations, or making smoke-test datasets without copying everything.
 
-## Example: Handsome Squidward (single-image LoRA)
-
-A working example of depth-anchored fine-tuning on a character that isn't well represented in the base model, with a **one-image dataset**.
-
-**The setup.** Handsome Squidward is a side character from a single SpongeBob SquarePants episode. Flux 2 Klein 9B doesn't reliably reproduce him out of the box; prompts default to regular Squidward or a confused human-squid hybrid. We trained a LoRA on a single official illustration to teach the model what he looks like, then tested whether the trained LoRA could generalize to angles and contexts that don't exist anywhere in the source material.
-
-**The dataset.** One image, one caption.
-
-```
-examples/squidward/dataset/
-├── 1.webp     # single training image
-└── 1.txt      # caption
-```
-
-The caption: *"a cartoon illustration of handsome squidward. he is standing confidently with his arms flared and his tentacle-hands on his hips. he is wearing a tight yellow shirt with a brown belt and gold buckle. he has four legs, two on each side close together. his legs are spread apart. there is a logo at the bottom of the frame."*
-
-**The config.** [`examples/squidward/config.yaml`](examples/squidward/config.yaml) is the full training config. Key settings:
-
-- **Network:** LoKr, linear/alpha 32, conv/alpha 16, full-rank, factor 8.
-- **Steps:** 1200, batch size 1, gradient accumulation 2.
-- **Dataset:** 1 image, `num_repeats: 50`.
-- **Depth anchor:** `loss_weight: 0.005`, `model_id: depth-anything/Depth-Anything-V2-Large-hf`, `input_size: 1400`. The lower weight matches the larger perceptor's higher gradient magnitude (see the depth-anchor section above).
-- **Loss splitting:** `loss_split: diffusion_depth` on the dataset, so depth and diffusion fire on alternating optimizer steps.
-- **Mask source: none.** Single-character cartoon images with white backgrounds don't need masking.
-
-**Watching the depth anchor work.** Each preview tile shows (GT RGB | GT depth | Pred RGB | Pred depth) side by side. At the start of training the predicted depth is unstructured noise; by the end it tracks the GT depth closely.
-
-**Early (step 21)** `depth_consistency_loss: 26.6`
-
-![Early preview](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/preview_early.jpg)
-
-**Late (step 1199)** `depth_consistency_loss: 1.6`
-
-![Late preview](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/preview_late.jpg)
-
-**Generalizing past the dataset.** The training image is a confident front-three-quarter pose. Generations from the trained LoRA hold the character identity in poses, framings, and contexts that don't exist in the source material:
-
-| | |
-|:---:|:---:|
-| ![Output 1](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/output_1.png) | ![Output 2](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/output_2.png) |
-
-The first output is a near-direct front view, and there is no front-view reference anywhere in the source material, let alone the dataset. Both outputs maintain the character's distinctive identity (chiseled face, squid morphology, the specific drawn-on aesthetic) while placing him in contexts the LoRA wasn't trained on.
-
-**Why it works.** From a single image, per-pixel diffusion MSE alone would just memorize the training photo. The depth anchor adds a structural objective that gets reinforced on the same one image, so the LoRA picks up a 3D-ish understanding of the character's shape that lets it interpolate to unseen angles. Loss splitting keeps the diffusion and depth gradients from interfering with each other, which dramatically reduces the texture burn-in that's the typical failure mode of one-shot LoRAs.
-
-**To reproduce:**
-
-```bash
-python run.py examples/squidward/config.yaml
-```
-
-Edit `model.name_or_path` in the config to point at your local Flux 2 Klein checkpoint before running.
-
 ## Example: Sketchwave Style (single-image style LoRA)
 
-Like the Squidward example above, but for a style instead of a specific subject. One training image, one caption, and the LoRA picks up an entire visual vocabulary.
+Single-image LoRA training, but for a style instead of a specific subject. One training image, one caption, and the LoRA picks up an entire visual vocabulary.
 
 Sketchwave is a specific look: sketchy graphite-style linework over warm cream paper, with restricted earthy palettes (olive-green, ochre, wine-red, sepia) and slightly painterly shading. There's one training image, a portrait. The goal is for the LoRA to apply the look to anything the base model can paint, including subjects with nothing in common with the portrait.
 
@@ -372,6 +319,59 @@ A working example of depth-anchored fine-tuning on an **artist's style** rather 
 | ![Cloud](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/output_cloud.png) | ![Snow White](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/output_snow.png) | ![Ziggy](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/output_ziggy.png) |
 
 **Why depth anchoring matters here.** With a style dataset this small, the diffusion loss alone tends to overfit on the specific compositions of the training images; every output starts looking like a slight variation on the same handful of poses and figures. The depth anchor pushes the LoRA toward what's invariant across the artist's work (linework, paper texture, color treatment) and away from what's incidental (this exact figure, in this exact pose, against this exact background). Loss splitting reinforces the separation: the diffusion-step focuses on appearance, the depth-step on structure, and they only really agree on the high-level "this looks like Amano" signal.
+
+## Example: Handsome Squidward (single-image LoRA)
+
+A working example of depth-anchored fine-tuning on a character that isn't well represented in the base model, with a **one-image dataset**.
+
+**The setup.** Handsome Squidward is a side character from a single SpongeBob SquarePants episode. Flux 2 Klein 9B doesn't reliably reproduce him out of the box; prompts default to regular Squidward or a confused human-squid hybrid. We trained a LoRA on a single official illustration to teach the model what he looks like, then tested whether the trained LoRA could generalize to angles and contexts that don't exist anywhere in the source material.
+
+**The dataset.** One image, one caption.
+
+```
+examples/squidward/dataset/
+├── 1.webp     # single training image
+└── 1.txt      # caption
+```
+
+The caption: *"a cartoon illustration of handsome squidward. he is standing confidently with his arms flared and his tentacle-hands on his hips. he is wearing a tight yellow shirt with a brown belt and gold buckle. he has four legs, two on each side close together. his legs are spread apart. there is a logo at the bottom of the frame."*
+
+**The config.** [`examples/squidward/config.yaml`](examples/squidward/config.yaml) is the full training config. Key settings:
+
+- **Network:** LoKr, linear/alpha 32, conv/alpha 16, full-rank, factor 8.
+- **Steps:** 1200, batch size 1, gradient accumulation 2.
+- **Dataset:** 1 image, `num_repeats: 50`.
+- **Depth anchor:** `loss_weight: 0.005`, `model_id: depth-anything/Depth-Anything-V2-Large-hf`, `input_size: 1400`. The lower weight matches the larger perceptor's higher gradient magnitude (see the depth-anchor section above).
+- **Loss splitting:** `loss_split: diffusion_depth` on the dataset, so depth and diffusion fire on alternating optimizer steps.
+- **Mask source: none.** Single-character cartoon images with white backgrounds don't need masking.
+
+**Watching the depth anchor work.** Each preview tile shows (GT RGB | GT depth | Pred RGB | Pred depth) side by side. At the start of training the predicted depth is unstructured noise; by the end it tracks the GT depth closely.
+
+**Early (step 21)** `depth_consistency_loss: 26.6`
+
+![Early preview](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/preview_early.jpg)
+
+**Late (step 1199)** `depth_consistency_loss: 1.6`
+
+![Late preview](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/preview_late.jpg)
+
+**Generalizing past the dataset.** The training image is a confident front-three-quarter pose. Generations from the trained LoRA hold the character identity in poses, framings, and contexts that don't exist in the source material:
+
+| | |
+|:---:|:---:|
+| ![Output 1](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/output_1.png) | ![Output 2](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/output_2.png) |
+
+The first output is a near-direct front view, and there is no front-view reference anywhere in the source material, let alone the dataset. Both outputs maintain the character's distinctive identity (chiseled face, squid morphology, the specific drawn-on aesthetic) while placing him in contexts the LoRA wasn't trained on.
+
+**Why it works.** From a single image, per-pixel diffusion MSE alone would just memorize the training photo. The depth anchor adds a structural objective that gets reinforced on the same one image, so the LoRA picks up a 3D-ish understanding of the character's shape that lets it interpolate to unseen angles. Loss splitting keeps the diffusion and depth gradients from interfering with each other, which dramatically reduces the texture burn-in that's the typical failure mode of one-shot LoRAs.
+
+**To reproduce:**
+
+```bash
+python run.py examples/squidward/config.yaml
+```
+
+Edit `model.name_or_path` in the config to point at your local Flux 2 Klein checkpoint before running.
 
 ## Configuration Reference
 
