@@ -282,51 +282,53 @@ Edit `model.name_or_path` in the config to point at your local Flux 2 Klein chec
 
 ## Example: Yoshitaka Amano Style (small-dataset style LoRA)
 
-A working example of depth-anchored fine-tuning on an **artist's style** rather than a specific subject, on a **small dataset** of 14 illustrations. Yoshitaka Amano is the illustrator behind the original Final Fantasy character art and a long-running body of solo watercolor portrait work. Flux 2 Klein 9B doesn't reproduce his look from a prompt alone; it defaults to generic anime or oil-paint stylings.
+Training a style LoRA from a small dataset of 14 illustrations. With depth anchoring the LoRA learns enough of the artist's visual language to carry it onto subjects nowhere in the dataset.
 
-**The reference style.** One illustration from the dataset is shown below to give a feel for what the LoRA is asked to learn: loose ink linework, watercolor washes, ornate costuming, hair drawn as long flowing tendrils.
+Yoshitaka Amano is the illustrator behind the original Final Fantasy character art and a long-running body of solo watercolor portrait work. Flux 2 Klein 9B doesn't reproduce his look from a prompt alone; it defaults to generic anime or oil-paint stylings.
+
+One illustration from the dataset is shown below to give a feel for what the LoRA is asked to learn: loose ink linework, watercolor washes, ornate costuming, hair drawn as long flowing tendrils.
 
 | ![Reference](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/dataset_reference.jpeg) |
 |:---:|
 | One of the 14 training illustrations. |
 
-**The config.** Key settings (full config at `output/amano/config.yaml` after a run):
+Key bits (full config at `output/amano/config.yaml` after a run):
 
-- **Network:** LoKr, linear/alpha 32, conv/alpha 16, full-rank, factor 8.
-- **Steps:** 4000, batch size 1, gradient accumulation 2.
-- **Resolution:** 768.
-- **Depth anchor:** `loss_weight: 0.005`, `model_id: depth-anything/Depth-Anything-V2-Large-hf`, `input_size: 1400`, `mask_source: none`.
-- **Loss splitting:** `loss_split: diffusion_depth` on the dataset, so depth and diffusion fire on alternating optimizer steps.
+- LoKr, linear/alpha 32, conv/alpha 16, full-rank, factor 8.
+- 4000 steps, batch size 1, gradient accumulation 2.
+- Resolution 768.
+- Depth anchor: weight `0.005`, DA2-Large at `input_size: 1400`, `mask_source: none`.
+- Loss splitting on the dataset (`loss_split: diffusion_depth`).
 
-**Watching the depth anchor work.** The ground-truth pair (RGB | depth) is shown once at the top; the predicted pair (RGB | depth) is shown for an early and late step at a comparable noise level. Early on, the predicted depth has heavy halo artifacts and doesn't track the figure cleanly; by the end of training it's a much closer match to the GT depth.
+You can watch the depth anchor converge across training. Ground-truth pair (RGB | depth) first, then predicted pairs from an early step and a late step at a comparable noise level. Early on the predicted depth has heavy halo artifacts and doesn't track the figure cleanly; by the end it's a much closer match.
 
-**Ground truth** (RGB | depth)
+Ground truth (RGB | depth):
 
 ![Ground truth](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/preview_gt.jpg)
 
-**Early prediction (step 383, t=0.82)** `depth_consistency_loss: 17.17`
+Early prediction (step 383, t=0.82), `depth_consistency_loss: 17.17`:
 
 ![Early prediction](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/preview_pred_early.jpg)
 
-**Late prediction (step 3941, t=0.81)** `depth_consistency_loss: 6.67`
+Late prediction (step 3941, t=0.81), `depth_consistency_loss: 6.67`:
 
 ![Late prediction](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/preview_pred_late.jpg)
 
-**Generalizing past the dataset.** None of these subjects appear in the training set. The LoRA carries Amano's linework, color treatment, and composition language onto subjects from very different IPs:
+None of these subjects appear in the training set. The LoRA carries Amano's linework, color treatment, and composition language onto subjects from very different IPs:
 
 | Cloud (FF7) | Snow White (Disney) | Ziggy Stardust (Bowie) |
 |:---:|:---:|:---:|
 | ![Cloud](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/output_cloud.png) | ![Snow White](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/output_snow.png) | ![Ziggy](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-amano-v1/output_ziggy.png) |
 
-**Why depth anchoring matters here.** With a style dataset this small, the diffusion loss alone tends to overfit on the specific compositions of the training images; every output starts looking like a slight variation on the same handful of poses and figures. The depth anchor pushes the LoRA toward what's invariant across the artist's work (linework, paper texture, color treatment) and away from what's incidental (this exact figure, in this exact pose, against this exact background). Loss splitting reinforces the separation: the diffusion-step focuses on appearance, the depth-step on structure, and they only really agree on the high-level "this looks like Amano" signal.
+With a style dataset this small, the diffusion loss alone tends to overfit on the specific compositions of the training images; every output starts looking like a slight variation on the same handful of poses and figures. The depth anchor pushes the LoRA toward what's invariant across the artist's work (linework, paper texture, color treatment) and away from what's incidental (this exact figure, in this exact pose, against this exact background). Loss splitting reinforces the separation: the diffusion-step focuses on appearance, the depth-step on structure, and they only really agree on the high-level "this looks like Amano" signal.
 
 ## Example: Handsome Squidward (single-image LoRA)
 
-A working example of depth-anchored fine-tuning on a character that isn't well represented in the base model, with a **one-image dataset**.
+Training a subject LoRA from a single image. One illustration, one caption, and the LoRA learns a character the base model can't reliably reproduce.
 
-**The setup.** Handsome Squidward is a side character from a single SpongeBob SquarePants episode. Flux 2 Klein 9B doesn't reliably reproduce him out of the box; prompts default to regular Squidward or a confused human-squid hybrid. We trained a LoRA on a single official illustration to teach the model what he looks like, then tested whether the trained LoRA could generalize to angles and contexts that don't exist anywhere in the source material.
+Handsome Squidward is a side character from a single SpongeBob SquarePants episode. Flux 2 Klein 9B doesn't reliably reproduce him out of the box; prompts default to regular Squidward or a confused human-squid hybrid. We trained a LoRA on a single official illustration to teach the model what he looks like, then tested whether the trained LoRA could generalize to angles and contexts that don't exist anywhere in the source material.
 
-**The dataset.** One image, one caption.
+Dataset layout:
 
 ```
 examples/squidward/dataset/
@@ -336,26 +338,25 @@ examples/squidward/dataset/
 
 The caption: *"a cartoon illustration of handsome squidward. he is standing confidently with his arms flared and his tentacle-hands on his hips. he is wearing a tight yellow shirt with a brown belt and gold buckle. he has four legs, two on each side close together. his legs are spread apart. there is a logo at the bottom of the frame."*
 
-**The config.** [`examples/squidward/config.yaml`](examples/squidward/config.yaml) is the full training config. Key settings:
+Full config is at [`examples/squidward/config.yaml`](examples/squidward/config.yaml). Key bits:
 
-- **Network:** LoKr, linear/alpha 32, conv/alpha 16, full-rank, factor 8.
-- **Steps:** 1200, batch size 1, gradient accumulation 2.
-- **Dataset:** 1 image, `num_repeats: 50`.
-- **Depth anchor:** `loss_weight: 0.005`, `model_id: depth-anything/Depth-Anything-V2-Large-hf`, `input_size: 1400`. The lower weight matches the larger perceptor's higher gradient magnitude (see the depth-anchor section above).
-- **Loss splitting:** `loss_split: diffusion_depth` on the dataset, so depth and diffusion fire on alternating optimizer steps.
-- **Mask source: none.** Single-character cartoon images with white backgrounds don't need masking.
+- LoKr, linear/alpha 32, conv/alpha 16, full-rank, factor 8.
+- 1200 steps, batch size 1, gradient accumulation 2.
+- 1 image, `num_repeats: 50`.
+- Depth anchor: weight `0.005`, DA2-Large at `input_size: 1400`, `mask_source: none`.
+- Loss splitting on the dataset (`loss_split: diffusion_depth`).
 
-**Watching the depth anchor work.** Each preview tile shows (GT RGB | GT depth | Pred RGB | Pred depth) side by side. At the start of training the predicted depth is unstructured noise; by the end it tracks the GT depth closely.
+Each preview tile shows (GT RGB | GT depth | Pred RGB | Pred depth) side by side. At the start of training the predicted depth is unstructured noise; by the end it tracks the GT depth closely.
 
-**Early (step 21)** `depth_consistency_loss: 26.6`
+Early (step 21), `depth_consistency_loss: 26.6`:
 
 ![Early preview](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/preview_early.jpg)
 
-**Late (step 1199)** `depth_consistency_loss: 1.6`
+Late (step 1199), `depth_consistency_loss: 1.6`:
 
 ![Late preview](https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/releases/download/examples-squidward-v1/preview_late.jpg)
 
-**Generalizing past the dataset.** The training image is a confident front-three-quarter pose. Generations from the trained LoRA hold the character identity in poses, framings, and contexts that don't exist in the source material:
+The training image is a confident front-three-quarter pose. Generations from the trained LoRA hold the character identity in poses, framings, and contexts that don't exist in the source material:
 
 | | |
 |:---:|:---:|
@@ -363,15 +364,15 @@ The caption: *"a cartoon illustration of handsome squidward. he is standing conf
 
 The first output is a near-direct front view, and there is no front-view reference anywhere in the source material, let alone the dataset. Both outputs maintain the character's distinctive identity (chiseled face, squid morphology, the specific drawn-on aesthetic) while placing him in contexts the LoRA wasn't trained on.
 
-**Why it works.** From a single image, per-pixel diffusion MSE alone would just memorize the training photo. The depth anchor adds a structural objective that gets reinforced on the same one image, so the LoRA picks up a 3D-ish understanding of the character's shape that lets it interpolate to unseen angles. Loss splitting keeps the diffusion and depth gradients from interfering with each other, which dramatically reduces the texture burn-in that's the typical failure mode of one-shot LoRAs.
+From a single image, per-pixel diffusion MSE alone would just memorize the training photo. The depth anchor adds a structural objective that gets reinforced on the same one image, so the LoRA picks up a 3D-ish understanding of the character's shape that lets it interpolate to unseen angles. Loss splitting keeps the diffusion and depth gradients from interfering with each other, which dramatically reduces the texture burn-in that's the typical failure mode of one-shot LoRAs.
 
-**To reproduce:**
+To reproduce:
 
 ```bash
 python run.py examples/squidward/config.yaml
 ```
 
-Edit `model.name_or_path` in the config to point at your local Flux 2 Klein checkpoint before running.
+Edit `model.name_or_path` in the config to point at your local Flux 2 Klein checkpoint first.
 
 ## Configuration Reference
 
