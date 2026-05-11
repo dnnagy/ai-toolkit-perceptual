@@ -1260,16 +1260,17 @@ class SDTrainer(BaseSDTrainProcess):
                 return pixels.clamp(0, 1)
 
             def _cache_dataset_depth(ds):
-                cache_depth_gt_embeddings(
-                    ds.file_list, self.depth_consistency_config,
-                    device=self.device_torch,
-                    vae_roundtrip_fn=_vae_roundtrip_for_depth,
-                )
-                if getattr(ds, 'num_frames', 1) > 1:
+                if getattr(ds, 'is_video', False):
                     cache_video_depth_gt_embeddings(
                         ds.file_list, self.depth_consistency_config,
                         device=self.device_torch,
-                        num_frames=ds.num_frames,
+                        num_frames=ds.dataset_config.num_frames,
+                    )
+                else:
+                    cache_depth_gt_embeddings(
+                        ds.file_list, self.depth_consistency_config,
+                        device=self.device_torch,
+                        vae_roundtrip_fn=_vae_roundtrip_for_depth,
                     )
 
             if self.data_loader is not None:
@@ -1689,14 +1690,47 @@ class SDTrainer(BaseSDTrainProcess):
             [bool(v) for v in is_reg_list],
             device=self.device_torch, dtype=torch.bool,
         )
-        # Per-sample loss-split flag — see DatasetConfig.loss_split. When
-        # set to 'diffusion_depth', the dataset alternates which big loss
-        # fires per optimizer step (not per microbatch — gating keys on
-        # self.step_num, which only advances after the full accumulation
-        # window completes, so all microbatches in one optimizer step see
-        # the same active loss). Even step_num: diffusion only; odd: depth
-        # only. Other auxiliaries fire as their own gating allows on both.
-        _split_list = getattr(batch, 'loss_split_list', None) or [None] * is_reg_per_sample.shape[0]
+        # Per-sample loss-split flag. Resolution precedence (per sample):
+        #   1. dataset-level DatasetConfig.loss_split, if set:
+        #        - 'sum'             -> force off for this dataset
+        #        - 'diffusion_depth' -> force on for this dataset
+        #   2. global TrainConfig.loss_split if explicitly set in the YAML
+        #      (even to None — explicit None forces off)
+        #   3. autodetect: 'diffusion_depth' if the effective depth-
+        #      consistency loss weight on this sample is > 0
+        # When the resolved value is 'diffusion_depth', the sample
+        # alternates which big loss fires per optimizer step (not per
+        # microbatch — gating keys on self.step_num, which only advances
+        # after the full accumulation window completes, so all microbatches
+        # in one optimizer step see the same active loss). Even step_num:
+        # diffusion only; odd: depth only. Other auxiliaries fire as their
+        # own gating allows on both.
+        from toolkit.loss_split import resolve_loss_split
+        _split_list_raw = getattr(batch, 'loss_split_list', None) or [None] * is_reg_per_sample.shape[0]
+        _global_split = getattr(self.train_config, 'loss_split', None)
+        _global_split_explicit = bool(getattr(self.train_config, '_loss_split_explicit', False))
+        _global_dc_w = (
+            float(self.depth_consistency_config.loss_weight)
+            if self.depth_consistency_config is not None else 0.0
+        )
+        _per_sample_dc_w = getattr(batch, 'depth_loss_weight_list', None)
+
+        def _effective_dc_weight(idx: int) -> float:
+            if _per_sample_dc_w is not None and idx < len(_per_sample_dc_w):
+                ds_dc_w = _per_sample_dc_w[idx]
+                if ds_dc_w is not None:
+                    return float(ds_dc_w)
+            return _global_dc_w
+
+        _split_list = [
+            resolve_loss_split(
+                ds_value=_v,
+                global_value=_global_split,
+                global_explicit=_global_split_explicit,
+                effective_depth_weight=_effective_dc_weight(_i),
+            )
+            for _i, _v in enumerate(_split_list_raw)
+        ]
         loss_split_diff_depth = torch.tensor(
             [s == 'diffusion_depth' for s in _split_list],
             device=self.device_torch, dtype=torch.bool,

@@ -499,6 +499,26 @@ class TrainConfig:
         self.diffusion_loss_min_t: float = kwargs.get('diffusion_loss_min_t', 0.0)
         self.diffusion_loss_max_t: float = kwargs.get('diffusion_loss_max_t', 1.0)
 
+        # Global loss-split mode (see DatasetConfig.loss_split for the
+        # per-dataset version). Three states:
+        #   - key absent  : autodetect — turn on 'diffusion_depth' for any
+        #                   dataset where the effective depth-consistency
+        #                   loss weight is > 0. Off otherwise.
+        #   - explicit None: force off everywhere unless a per-dataset
+        #                   override sets it.
+        #   - 'diffusion_depth': force on for every dataset that doesn't set
+        #                   its own loss_split.
+        # Per-dataset loss_split (DatasetConfig.loss_split) always wins over
+        # the global setting on its samples.
+        self._loss_split_explicit: bool = ('loss_split' in kwargs)
+        self.loss_split: Union[str, None] = kwargs.get('loss_split', None)
+        if self.loss_split is not None and self.loss_split not in ('diffusion_depth',):
+            raise ValueError(
+                f"Unknown train.loss_split value: {self.loss_split!r}. "
+                "Allowed: None (off), 'diffusion_depth', or omit the key for "
+                "autodetect."
+            )
+
         # Diagnostic: every N steps, do a dual backward (depth-only and
         # everything-else-only) to log per-loss gradient norms and the cosine
         # between them. 0 disables. Costs an extra backward pass + grad clone
@@ -1173,17 +1193,26 @@ class DatasetConfig:
         self.depth_loss_min_t: Union[float, None] = kwargs.get('depth_loss_min_t', None)
         self.depth_loss_max_t: Union[float, None] = kwargs.get('depth_loss_max_t', None)
         # Per-optimizer-step alternation between diffusion and depth losses
-        # for this dataset's samples. None = both fire as normal. The gating
-        # keys on self.step_num (advanced after each full accumulation
-        # window) so all microbatches in one optimizer step see the same
-        # active loss — Adam integrates clean single-objective gradients.
-        # Other auxiliaries (identity, body_*, normal, vae_anchor, latent
-        # perceptual) are unaffected and fire as their own gating allows.
+        # for this dataset's samples. Three states:
+        #   - None              : inherit from global TrainConfig.loss_split
+        #                         (which itself can be autodetect, force-on,
+        #                         or force-off).
+        #   - 'diffusion_depth' : force on for this dataset, regardless of
+        #                         the global setting.
+        #   - 'sum'             : force off for this dataset (losses sum
+        #                         every step), regardless of the global.
+        # The gating keys on self.step_num (advanced after each full
+        # accumulation window) so all microbatches in one optimizer step
+        # see the same active loss — Adam integrates clean single-objective
+        # gradients. Other auxiliaries (identity, body_*, normal,
+        # vae_anchor, latent perceptual) are unaffected and fire as their
+        # own gating allows.
         self.loss_split: Union[str, None] = kwargs.get('loss_split', None)
-        if self.loss_split is not None and self.loss_split not in ('diffusion_depth',):
+        if self.loss_split is not None and self.loss_split not in ('diffusion_depth', 'sum'):
             raise ValueError(
                 f"Unknown loss_split value: {self.loss_split!r}. "
-                "Allowed: None, 'diffusion_depth'"
+                "Allowed: None (inherit from global), 'diffusion_depth' "
+                "(force on), 'sum' (force off, sum every step)"
             )
         # Subject mask (Phase 2) per-dataset overrides: None inherits global SubjectMaskConfig
         self.background_loss_weight: Union[float, None] = kwargs.get('background_loss_weight', None)

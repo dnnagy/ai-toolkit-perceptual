@@ -109,7 +109,16 @@ datasets:
 
 Ground-truth depth maps are cached automatically at job start, so the anchor adds no per-step preprocessing cost once training begins.
 
-**Loss splitting (strongly recommended for most cases).** When the diffusion loss and depth anchor pull in different directions, having them fire on alternating optimizer steps instead of competing every step turns out to work better than running them together for almost every workflow we've tested. Set it on the dataset:
+**Loss splitting (on by default whenever depth anchoring is active).** When the diffusion loss and depth anchor pull in different directions, having them fire on alternating optimizer steps instead of competing every step turns out to work better than running them together for almost every workflow we've tested. As of this version, the trainer turns this on automatically for every dataset whose effective depth-consistency weight is > 0, so you usually don't need to set anything. If you want to be explicit, you can flip it on or off globally:
+
+```yaml
+train:
+  loss_split: diffusion_depth   # force on for all datasets
+  # loss_split: null            # force off everywhere
+  # (omit the key entirely for autodetect, which is the default)
+```
+
+Or override per dataset, which always wins over the global setting:
 
 ```yaml
 datasets:
@@ -117,7 +126,7 @@ datasets:
     loss_split: diffusion_depth
 ```
 
-This separates structure-learning (depth) from appearance-learning (diffusion) into distinct optimizer steps. In practice it acts as a strong implicit regularizer against burn-in: fine-texture parameters update much more slowly than coarse-structure parameters, since the two losses only really agree on the latter. Try it before tuning weights or other knobs.
+This separates structure-learning (depth) from appearance-learning (diffusion) into distinct optimizer steps. In practice it acts as a strong implicit regularizer against burn-in: fine-texture parameters update much more slowly than coarse-structure parameters, since the two losses only really agree on the latter. The autodetect default means turning on the depth anchor is enough to get the splitting behavior; you only need to touch this if you want the old summed-every-step behavior back.
 
 ### Identity Anchor (ArcFace)
 Keeps the trained subject's face recognizable across poses, expressions, and lighting. Useful when you're training on diverse appearances of the same person and the diffusion loss alone isn't enough to lock in identity. Recommended weight: **0.01 to 0.1**.
@@ -456,6 +465,7 @@ Auto-masking pipeline.
 | Option | Default | What it does, when to use it |
 |---|---|---|
 | `reg_weight` | `1.0` | Multiplier on diffusion loss for reg samples. `1.0` (equal pull) is the sane default. Increase to 1.5-2.0 if reg isn't preserving the prior strongly enough. |
+| `loss_split` | autodetect | Global default for the per-dataset `loss_split` knob. When the key is omitted, the trainer turns on `diffusion_depth` automatically for every dataset whose effective depth-consistency loss weight is > 0. Set explicitly to `diffusion_depth` to force on everywhere, or to `null` to force off (back to summed-every-step). Per-dataset `loss_split` always wins. |
 | `gradient_cosine_log_every` | `0` | Diagnostic. Every N optimizer steps, measure `cos(g_diffusion, g_depth)` and log the per-loss gradient norms. `0` disables. Use 50-100 to diagnose anchor conflicts without much overhead. |
 | `min_denoising_steps` | `0` | Lower bound on the timestep sampler (0-999). The training loop only samples from `[min, max]`. Useful for focused training, e.g. `min=700, max=700` to train at one specific noise level. |
 | `max_denoising_steps` | `999` | Upper bound on the timestep sampler. |
@@ -467,7 +477,7 @@ Every entry in `datasets:` accepts these extension-specific overrides. `null` or
 | Option | What it does, when to use it |
 |---|---|
 | `is_reg` | Mark this dataset as a regularization set. Strips subject conditioning and turns off all perceptual anchors on its samples. |
-| `loss_split: diffusion_depth` | Strongly recommended for most cases. Alternates diffusion and depth-anchor on this dataset's samples per optimizer step (rather than running both every step). |
+| `loss_split` | Per-dataset override of the global `train.loss_split`. Omit (or set `null`) to inherit. Set to `diffusion_depth` to force on for this dataset (alternates diffusion and depth-anchor per optimizer step). Set to `sum` to force off for this dataset (losses sum every step). Per-dataset always wins over the global. |
 | `depth_loss_weight` | Per-dataset override of the depth anchor's `loss_weight`. Set to `0` to fully disable the depth anchor for this dataset (skips perceptor compute on its samples). |
 | `depth_loss_min_t` / `depth_loss_max_t` | Per-dataset depth-anchor timestep window. |
 | `depth_model_id` | Per-dataset DA2 variant. Useful if one dataset has unusual geometry that benefits from Large while others stay on Small. |

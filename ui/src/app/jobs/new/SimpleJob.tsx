@@ -610,6 +610,36 @@ export default function SimpleJob({
                   min={0}
                   max={999}
                 />
+                {/* Global default for per-dataset loss_split.
+                    'auto' = key omitted: trainer turns it on for any dataset
+                            whose effective depth-consistency weight is > 0.
+                    'diffusion_depth' = force on everywhere (string).
+                    'off' = explicit null in YAML: force off everywhere. */}
+                <SelectInput
+                  label="Loss Split (global)"
+                  className="pt-2"
+                  value={
+                    jobConfig.config.process[0].train.loss_split === undefined
+                      ? 'auto'
+                      : jobConfig.config.process[0].train.loss_split === null
+                      ? 'off'
+                      : jobConfig.config.process[0].train.loss_split
+                  }
+                  onChange={value => {
+                    if (value === 'auto') {
+                      setJobConfig(undefined, 'config.process[0].train.loss_split');
+                    } else if (value === 'off') {
+                      setJobConfig(null, 'config.process[0].train.loss_split');
+                    } else {
+                      setJobConfig(value, 'config.process[0].train.loss_split');
+                    }
+                  }}
+                  options={[
+                    { value: 'auto', label: 'Auto (on when depth anchor is active)' },
+                    { value: 'diffusion_depth', label: 'Force on (Diffusion / Depth alternating)' },
+                    { value: 'off', label: 'Force off (sum every step)' },
+                  ]}
+                />
                 {/* Latent perceptual loss — experimental, hidden for now
                 <NumberInput
                   label="Latent Perceptual Loss Weight"
@@ -1871,16 +1901,31 @@ export default function SimpleJob({
                             <NumberInput label="Max t" value={dataset.depth_loss_max_t ?? null} onChange={value => setJobConfig(value === null || value === undefined ? undefined : value, `config.process[0].datasets[${i}].depth_loss_max_t`)} placeholder="inherit" min={0} max={1} />
                           </div>
                         </div>
-                        {/* Loss Alternation: alternate diffusion / depth per optimizer step */}
+                        {/* Loss Alternation: alternate diffusion / depth per optimizer step.
+                            Three states match the global Loss Split:
+                              'auto' = key omitted (or null): inherit from global.
+                              'diffusion_depth' = force on for this dataset.
+                              'sum' = force off for this dataset (sum every step). */}
                         <div>
                           <div className="text-xs font-medium text-gray-400 mb-1">Loss Alternation</div>
                           <SelectInput
                             label="Loss Split"
-                            value={dataset.loss_split ?? ''}
-                            onChange={value => setJobConfig(value === '' ? null : value, `config.process[0].datasets[${i}].loss_split`)}
+                            value={
+                              dataset.loss_split === undefined || dataset.loss_split === null
+                                ? 'auto'
+                                : dataset.loss_split
+                            }
+                            onChange={value => {
+                              if (value === 'auto') {
+                                setJobConfig(undefined, `config.process[0].datasets[${i}].loss_split`);
+                              } else {
+                                setJobConfig(value, `config.process[0].datasets[${i}].loss_split`);
+                              }
+                            }}
                             options={[
-                              { value: '', label: 'None (all losses fire)' },
-                              { value: 'diffusion_depth', label: 'Diffusion / Depth alternating' },
+                              { value: 'auto', label: 'Auto (use global)' },
+                              { value: 'diffusion_depth', label: 'Force on (Diffusion / Depth alternating)' },
+                              { value: 'sum', label: 'Force off (sum every step)' },
                             ]}
                           />
                         </div>
