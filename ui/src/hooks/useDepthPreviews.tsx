@@ -10,6 +10,9 @@ export interface DepthPreview {
   t: number;
   dc?: number;
   srcName?: string;
+  /** Pixel dimensions of the underlying sample (W × H), when the trainer
+   *  encoded them in the filename. Older previews lack this. */
+  size?: { w: number; h: number };
 }
 
 export default function useDepthPreviews(jobID: string, reloadInterval: null | number = null) {

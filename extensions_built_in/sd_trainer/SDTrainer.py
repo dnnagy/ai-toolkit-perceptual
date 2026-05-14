@@ -3478,9 +3478,10 @@ class SDTrainer(BaseSDTrainProcess):
                             _t_val = _dc_t[_dc_i].item()
                             _dc_val = float(_dc_loss_i)
                             src_name = os.path.splitext(os.path.basename(ref_path))[0]
+                            _h_px, _w_px = int(pred_rgb.shape[-2]), int(pred_rgb.shape[-1])
                             combo.save(os.path.join(
                                 dc_preview_dir,
-                                f'{src_name}_step{self.step_num:06d}_t{_t_val:.2f}_dc{_dc_val:.4f}.jpg'
+                                f'{src_name}_step{self.step_num:06d}_t{_t_val:.2f}_dc{_dc_val:.4f}_s{_w_px}x{_h_px}.jpg'
                             ))
                         except Exception as e:  # noqa: BLE001
                             print_acc(f"  depth preview failed: {e}")
@@ -3688,9 +3689,11 @@ class SDTrainer(BaseSDTrainProcess):
                                 dc_preview_dir = os.path.join(self.save_root, 'depth_previews')
                                 os.makedirs(dc_preview_dir, exist_ok=True)
                                 _t_val = _dc_t[_dc_preview_b].item()
+                                _vh_px = int(_dc_frames[_dc_preview_b].shape[-2])
+                                _vw_px = int(_dc_frames[_dc_preview_b].shape[-1])
                                 out_path = os.path.join(
                                     dc_preview_dir,
-                                    f'step{self.step_num:06d}_t{_t_val:.2f}.webp'
+                                    f'step{self.step_num:06d}_t{_t_val:.2f}_s{_vw_px}x{_vh_px}.webp'
                                 )
                                 save_video_depth_preview(
                                     out_path,

@@ -34,9 +34,12 @@ function clamp01(v: number): number {
   if (!Number.isFinite(v)) return 0;
   return Math.max(0, Math.min(1, v));
 }
+function sizeKey(s?: { w: number; h: number }): string | null {
+  return s ? `${s.w}x${s.h}` : null;
+}
 function readInitialFromUrl() {
   if (typeof window === 'undefined') {
-    return { minStep: '', maxStep: '', minT: 0, maxT: 1, band: 'all' as Band, sample: 'all', sortKey: 'step' as SortKey, sortDir: 'desc' as SortDir, selectedFile: null as string | null };
+    return { minStep: '', maxStep: '', minT: 0, maxT: 1, band: 'all' as Band, sample: 'all', size: 'all', sortKey: 'step' as SortKey, sortDir: 'desc' as SortDir, selectedFile: null as string | null };
   }
   const p = new URLSearchParams(window.location.search);
   const band = p.get('dp_band');
@@ -51,6 +54,7 @@ function readInitialFromUrl() {
     maxT: maxTRaw == null ? 1 : clamp01(parseFloat(maxTRaw)),
     band: (band && BAND_SET.has(band as Band) ? band : 'all') as Band,
     sample: p.get('dp_sample') ?? 'all',
+    size: p.get('dp_size') ?? 'all',
     sortKey: (sortKey && SORT_KEYS.has(sortKey as SortKey) ? sortKey : 'step') as SortKey,
     sortDir: (sortDir === 'asc' ? 'asc' : 'desc') as SortDir,
     selectedFile: p.get('dp_selected'),
@@ -104,6 +108,8 @@ export default function DepthPreviews({ job }: Props) {
   const setBand = (v: Band) => { _setBand(v); writeUrl({ dp_band: v === 'all' ? null : v }); };
   const [sample, _setSample] = useState<string>(initial.sample);
   const setSample = (v: string) => { _setSample(v); writeUrl({ dp_sample: v === 'all' ? null : v }); };
+  const [size, _setSize] = useState<string>(initial.size);
+  const setSize = (v: string) => { _setSize(v); writeUrl({ dp_size: v === 'all' ? null : v }); };
   const [sortKey, _setSortKey] = useState<SortKey>(initial.sortKey);
   const setSortKey = (v: SortKey) => { _setSortKey(v); writeUrl({ dp_sortKey: v === 'step' ? null : v }); };
   const [sortDir, _setSortDir] = useState<SortDir>(initial.sortDir);
@@ -135,6 +141,22 @@ export default function DepthPreviews({ job }: Props) {
     return Array.from(set).sort();
   }, [previews]);
 
+  // Unique sample sizes ("WxH"), sorted by width then height for a stable
+  // listing. Previews from older trainer builds without a size suffix don't
+  // contribute and won't pass a size filter; they remain visible under "all".
+  const sizeOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of previews) {
+      const k = sizeKey(p.size);
+      if (k) set.add(k);
+    }
+    return Array.from(set).sort((a, b) => {
+      const [aw, ah] = a.split('x').map(n => parseInt(n, 10));
+      const [bw, bh] = b.split('x').map(n => parseInt(n, 10));
+      return aw - bw || ah - bh;
+    });
+  }, [previews]);
+
   const filtered = useMemo(() => {
     const stepLo = minStep === '' ? -Infinity : parseInt(minStep, 10);
     const stepHi = maxStep === '' ? Infinity : parseInt(maxStep, 10);
@@ -152,6 +174,9 @@ export default function DepthPreviews({ job }: Props) {
       // A specific sample selection only keeps previews with a matching
       // srcName, which means videos (no srcName) drop out unless "all".
       if (sample !== 'all' && p.srcName !== sample) return false;
+      // Same shape for size: pre-suffix previews lack size and drop out
+      // unless "all" — selecting a size means "show only this resolution".
+      if (size !== 'all' && sizeKey(p.size) !== size) return false;
       return true;
     });
     const dir = sortDir === 'asc' ? 1 : -1;
@@ -163,7 +188,7 @@ export default function DepthPreviews({ job }: Props) {
     };
     out.sort((a, b) => (keyFn(a) - keyFn(b)) * dir);
     return out;
-  }, [previews, minStep, maxStep, minT, maxT, band, sample, sortKey, sortDir]);
+  }, [previews, minStep, maxStep, minT, maxT, band, sample, size, sortKey, sortDir]);
 
   const counts = useMemo(() => {
     const total = previews.length;
@@ -297,6 +322,23 @@ export default function DepthPreviews({ job }: Props) {
           </select>
         </div>
         <div className="flex items-center gap-2">
+          <span className={labelCls}>Size</span>
+          <select
+            value={size}
+            onChange={e => setSize(e.target.value)}
+            className={inputCls}
+            disabled={sizeOptions.length === 0}
+            title={sizeOptions.length === 0 ? 'No sized previews discovered yet (older trainer builds omit the size suffix).' : 'Filter by sample resolution (W×H)'}
+          >
+            <option value="all">all ({sizeOptions.length})</option>
+            {sizeOptions.map(s => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
           <span className={labelCls}>Sort</span>
           <select value={sortKey} onChange={e => setSortKey(e.target.value as SortKey)} className={inputCls}>
             <option value="step">step</option>
@@ -347,6 +389,7 @@ export default function DepthPreviews({ job }: Props) {
                   <span><span className="text-gray-500">dc</span> {p.dc.toFixed(4)}</span>
                 )}
                 <span className="text-gray-500">{bandFor(p.t)}</span>
+                {p.size && <span className="text-gray-500">{p.size.w}×{p.size.h}</span>}
                 {p.srcName && <span className="text-gray-500 truncate">· {p.srcName}</span>}
               </div>
             </div>
@@ -388,6 +431,9 @@ export default function DepthPreviews({ job }: Props) {
               <span><span className="text-gray-500">dc</span> {selected.dc.toFixed(4)}</span>
             )}
             <span><span className="text-gray-500">band</span> {bandFor(selected.t)}</span>
+            {selected.size && (
+              <span><span className="text-gray-500">size</span> {selected.size.w}×{selected.size.h}</span>
+            )}
             {selected.srcName && (
               <span className="truncate max-w-[40ch]"><span className="text-gray-500">sample</span> {selected.srcName}</span>
             )}
