@@ -44,8 +44,19 @@ export default function DepthPreviews({ job }: Props) {
   const [minT, setMinT] = useState<number>(0);
   const [maxT, setMaxT] = useState<number>(1);
   const [band, setBand] = useState<Band>('all');
+  const [sample, setSample] = useState<string>('all');
   const [sortKey, setSortKey] = useState<SortKey>('step');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+
+  // Unique source names from image previews (videos have no src). Sorted
+  // alphabetically so the dropdown is stable as new previews stream in.
+  const sampleOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of previews) {
+      if (p.srcName) set.add(p.srcName);
+    }
+    return Array.from(set).sort();
+  }, [previews]);
 
   const filtered = useMemo(() => {
     const stepLo = minStep === '' ? -Infinity : parseInt(minStep, 10);
@@ -61,6 +72,9 @@ export default function DepthPreviews({ job }: Props) {
       if (Number.isFinite(stepLo) && p.step < stepLo) return false;
       if (Number.isFinite(stepHi) && p.step > stepHi) return false;
       if (p.t < tLo || p.t > tHi) return false;
+      // A specific sample selection only keeps previews with a matching
+      // srcName, which means videos (no srcName) drop out unless "all".
+      if (sample !== 'all' && p.srcName !== sample) return false;
       return true;
     });
     const dir = sortDir === 'asc' ? 1 : -1;
@@ -72,7 +86,7 @@ export default function DepthPreviews({ job }: Props) {
     };
     out.sort((a, b) => (keyFn(a) - keyFn(b)) * dir);
     return out;
-  }, [previews, minStep, maxStep, minT, maxT, band, sortKey, sortDir]);
+  }, [previews, minStep, maxStep, minT, maxT, band, sample, sortKey, sortDir]);
 
   const counts = useMemo(() => {
     const total = previews.length;
@@ -155,6 +169,23 @@ export default function DepthPreviews({ job }: Props) {
             {BAND_VALUES.map(b => (
               <option key={b} value={b}>
                 {b === 'all' ? 'all' : `${b} (${(parseInt(b.slice(1)) / 100).toFixed(2)}–${(parseInt(b.slice(1)) / 100 + 0.1).toFixed(2)})`}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={labelCls}>Sample</span>
+          <select
+            value={sample}
+            onChange={e => setSample(e.target.value)}
+            className={`${inputCls} max-w-[14rem]`}
+            disabled={sampleOptions.length === 0}
+            title={sampleOptions.length === 0 ? 'No samples discovered yet' : 'Filter by source image'}
+          >
+            <option value="all">all ({sampleOptions.length})</option>
+            {sampleOptions.map(s => (
+              <option key={s} value={s}>
+                {s}
               </option>
             ))}
           </select>
