@@ -1,10 +1,10 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import useDepthPreviews, { DepthPreview } from '@/hooks/useDepthPreviews';
 import SampleImageCard from './SampleImageCard';
 import { Job } from '@prisma/client';
-import { LuImageOff, LuLoader, LuBan } from 'react-icons/lu';
+import { LuImageOff, LuLoader, LuBan, LuX } from 'react-icons/lu';
 
 type SortKey = 'step' | 't' | 'dc';
 type SortDir = 'asc' | 'desc';
@@ -47,6 +47,8 @@ export default function DepthPreviews({ job }: Props) {
   const [sample, setSample] = useState<string>('all');
   const [sortKey, setSortKey] = useState<SortKey>('step');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
+  // Path of the preview currently zoomed in the overlay; null = closed.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
   // Unique source names from image previews (videos have no src). Sorted
   // alphabetically so the dropdown is stable as new previews stream in.
@@ -93,6 +95,35 @@ export default function DepthPreviews({ job }: Props) {
     const visible = filtered.length;
     return { total, visible };
   }, [previews, filtered]);
+
+  // Index of the currently-selected preview within the *filtered* list. -1
+  // when nothing is selected or when the selected item dropped out of the
+  // visible set (e.g. filters changed). We use path-as-identity rather than
+  // a raw index so filter/sort changes don't accidentally jump to a different
+  // image.
+  const selectedIdx = useMemo(() => {
+    if (selectedPath == null) return -1;
+    return filtered.findIndex(p => p.path === selectedPath);
+  }, [selectedPath, filtered]);
+  const selected = selectedIdx >= 0 ? filtered[selectedIdx] : null;
+
+  // Keyboard nav for the overlay. Esc closes; left/right step through the
+  // filtered list (wraps at the ends).
+  useEffect(() => {
+    if (selectedPath == null) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setSelectedPath(null);
+      } else if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && filtered.length > 0) {
+        const idx = selectedIdx >= 0 ? selectedIdx : 0;
+        const delta = e.key === 'ArrowRight' ? 1 : -1;
+        const next = (idx + delta + filtered.length) % filtered.length;
+        setSelectedPath(filtered[next].path);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [selectedPath, selectedIdx, filtered]);
 
   const emptyMessage = useMemo(() => {
     if (status === 'loading' && previews.length === 0) {
@@ -232,6 +263,7 @@ export default function DepthPreviews({ job }: Props) {
                 sampleImages={[p.path]}
                 alt={`depth preview step ${p.step} t ${p.t}`}
                 observerRoot={containerRef.current}
+                onClick={() => setSelectedPath(p.path)}
               />
               <div className="bg-gray-900 text-xs text-gray-300 px-2 py-1 rounded-b-lg flex flex-wrap gap-x-3">
                 <span><span className="text-gray-500">step</span> {p.step}</span>
@@ -244,6 +276,50 @@ export default function DepthPreviews({ job }: Props) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Zoom overlay */}
+      {selected && (
+        <div
+          className="fixed inset-0 z-50 bg-black/85 flex flex-col items-center justify-center p-4"
+          onClick={() => setSelectedPath(null)}
+        >
+          <button
+            type="button"
+            onClick={e => {
+              e.stopPropagation();
+              setSelectedPath(null);
+            }}
+            className="absolute top-3 right-3 w-10 h-10 rounded-full bg-gray-800/80 hover:bg-gray-700 text-gray-200 flex items-center justify-center"
+            title="Close (Esc)"
+            aria-label="Close"
+          >
+            <LuX className="w-5 h-5" />
+          </button>
+          <img
+            src={`/api/img/${encodeURIComponent(selected.path)}`}
+            alt={`depth preview step ${selected.step} t ${selected.t}`}
+            className="max-w-[95vw] max-h-[85vh] object-contain rounded-md shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          />
+          <div
+            className="mt-3 px-4 py-2 rounded-md bg-gray-900/90 text-gray-200 text-sm flex flex-wrap items-center gap-x-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <span><span className="text-gray-500">step</span> {selected.step}</span>
+            <span><span className="text-gray-500">t</span> {selected.t.toFixed(2)}</span>
+            {typeof selected.dc === 'number' && (
+              <span><span className="text-gray-500">dc</span> {selected.dc.toFixed(4)}</span>
+            )}
+            <span><span className="text-gray-500">band</span> {bandFor(selected.t)}</span>
+            {selected.srcName && (
+              <span className="truncate max-w-[40ch]"><span className="text-gray-500">sample</span> {selected.srcName}</span>
+            )}
+            <span className="ml-auto text-gray-500 text-xs">
+              {selectedIdx + 1} / {filtered.length}  ·  ← → to navigate, Esc to close
+            </span>
+          </div>
         </div>
       )}
     </div>
