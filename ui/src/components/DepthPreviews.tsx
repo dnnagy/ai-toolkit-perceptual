@@ -13,10 +13,60 @@ type SortDir = 'asc' | 'desc';
 // `t{int(bin_start*100):02d}`. See SDTrainer.py around line 2147 etc.
 const BAND_VALUES = ['all', 't00', 't10', 't20', 't30', 't40', 't50', 't60', 't70', 't80', 't90'] as const;
 type Band = (typeof BAND_VALUES)[number];
+const BAND_SET = new Set<Band>(BAND_VALUES);
+const SORT_KEYS = new Set<SortKey>(['step', 't', 'dc']);
 
 function bandFor(t: number): Band {
   const lo = Math.floor(Math.max(0, Math.min(0.999999, t)) * 10) * 10;
   return `t${lo.toString().padStart(2, '0')}` as Band;
+}
+
+// URL persistence: we don't go through next/router because filter state churns
+// on every keystroke and a full router.replace per change is overkill. Instead
+// we read the URL once on mount (so refresh + tab-return both restore state)
+// and write back with `replaceState` on change. Keys are namespaced with `dp_`
+// so other tabs can carve their own without collisions.
+function basename(p: string): string {
+  const i = p.lastIndexOf('/');
+  return i >= 0 ? p.slice(i + 1) : p;
+}
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(1, v));
+}
+function readInitialFromUrl() {
+  if (typeof window === 'undefined') {
+    return { minStep: '', maxStep: '', minT: 0, maxT: 1, band: 'all' as Band, sample: 'all', sortKey: 'step' as SortKey, sortDir: 'desc' as SortDir, selectedFile: null as string | null };
+  }
+  const p = new URLSearchParams(window.location.search);
+  const band = p.get('dp_band');
+  const sortKey = p.get('dp_sortKey');
+  const sortDir = p.get('dp_sortDir');
+  const minTRaw = p.get('dp_minT');
+  const maxTRaw = p.get('dp_maxT');
+  return {
+    minStep: p.get('dp_minStep') ?? '',
+    maxStep: p.get('dp_maxStep') ?? '',
+    minT: minTRaw == null ? 0 : clamp01(parseFloat(minTRaw)),
+    maxT: maxTRaw == null ? 1 : clamp01(parseFloat(maxTRaw)),
+    band: (band && BAND_SET.has(band as Band) ? band : 'all') as Band,
+    sample: p.get('dp_sample') ?? 'all',
+    sortKey: (sortKey && SORT_KEYS.has(sortKey as SortKey) ? sortKey : 'step') as SortKey,
+    sortDir: (sortDir === 'asc' ? 'asc' : 'desc') as SortDir,
+    selectedFile: p.get('dp_selected'),
+  };
+}
+function writeUrl(updates: Record<string, string | number | null | undefined>) {
+  if (typeof window === 'undefined') return;
+  const params = new URLSearchParams(window.location.search);
+  for (const [k, raw] of Object.entries(updates)) {
+    const v = raw == null ? '' : String(raw);
+    if (v === '') params.delete(k);
+    else params.set(k, v);
+  }
+  const q = params.toString();
+  const url = `${window.location.pathname}${q ? `?${q}` : ''}${window.location.hash}`;
+  window.history.replaceState(window.history.state, '', url);
 }
 
 interface Props {
@@ -38,17 +88,42 @@ export default function DepthPreviews({ job }: Props) {
   }, [previews]);
 
   // Filter / sort state. Empty strings on the step inputs mean "no constraint"
-  // — keeps the controls usable before previews finish loading.
-  const [minStep, setMinStep] = useState<string>('');
-  const [maxStep, setMaxStep] = useState<string>('');
-  const [minT, setMinT] = useState<number>(0);
-  const [maxT, setMaxT] = useState<number>(1);
-  const [band, setBand] = useState<Band>('all');
-  const [sample, setSample] = useState<string>('all');
-  const [sortKey, setSortKey] = useState<SortKey>('step');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  // — keeps the controls usable before previews finish loading. Initial values
+  // come from the URL (`dp_*` keys), so a refresh / tab-switch / shared link
+  // all land on the same view; setters mirror back to the URL.
+  const initial = useMemo(readInitialFromUrl, []);
+  const [minStep, _setMinStep] = useState<string>(initial.minStep);
+  const setMinStep = (v: string) => { _setMinStep(v); writeUrl({ dp_minStep: v }); };
+  const [maxStep, _setMaxStep] = useState<string>(initial.maxStep);
+  const setMaxStep = (v: string) => { _setMaxStep(v); writeUrl({ dp_maxStep: v }); };
+  const [minT, _setMinT] = useState<number>(initial.minT);
+  const setMinT = (v: number) => { const c = clamp01(v); _setMinT(c); writeUrl({ dp_minT: c === 0 ? null : c.toFixed(2) }); };
+  const [maxT, _setMaxT] = useState<number>(initial.maxT);
+  const setMaxT = (v: number) => { const c = clamp01(v); _setMaxT(c); writeUrl({ dp_maxT: c === 1 ? null : c.toFixed(2) }); };
+  const [band, _setBand] = useState<Band>(initial.band);
+  const setBand = (v: Band) => { _setBand(v); writeUrl({ dp_band: v === 'all' ? null : v }); };
+  const [sample, _setSample] = useState<string>(initial.sample);
+  const setSample = (v: string) => { _setSample(v); writeUrl({ dp_sample: v === 'all' ? null : v }); };
+  const [sortKey, _setSortKey] = useState<SortKey>(initial.sortKey);
+  const setSortKey = (v: SortKey) => { _setSortKey(v); writeUrl({ dp_sortKey: v === 'step' ? null : v }); };
+  const [sortDir, _setSortDir] = useState<SortDir>(initial.sortDir);
+  const setSortDir = (v: SortDir) => { _setSortDir(v); writeUrl({ dp_sortDir: v === 'desc' ? null : v }); };
   // Path of the preview currently zoomed in the overlay; null = closed.
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [selectedPath, _setSelectedPath] = useState<string | null>(null);
+  const setSelectedPath = (p: string | null) => {
+    _setSelectedPath(p);
+    writeUrl({ dp_selected: p ? basename(p) : null });
+  };
+  // Resolve the URL-restored selected filename to a full path once previews
+  // load. Only runs while we don't yet have a selection and the URL points at
+  // one — avoids overwriting an in-progress user selection.
+  useEffect(() => {
+    if (selectedPath != null) return;
+    if (!initial.selectedFile) return;
+    if (previews.length === 0) return;
+    const match = previews.find(p => basename(p.path) === initial.selectedFile);
+    if (match) _setSelectedPath(match.path);
+  }, [previews, selectedPath, initial.selectedFile]);
 
   // Unique source names from image previews (videos have no src). Sorted
   // alphabetically so the dropdown is stable as new previews stream in.
@@ -230,7 +305,7 @@ export default function DepthPreviews({ job }: Props) {
           </select>
           <button
             type="button"
-            onClick={() => setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))}
+            onClick={() => setSortDir(sortDir === 'asc' ? 'desc' : 'asc')}
             className={`${inputCls} cursor-pointer hover:bg-gray-800`}
             title="Toggle direction"
           >

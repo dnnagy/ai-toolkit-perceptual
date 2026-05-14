@@ -1,13 +1,13 @@
 'use client';
 
-import { useMemo, useState, use } from 'react';
+import { useMemo, use } from 'react';
 import { FaChevronLeft } from 'react-icons/fa';
 import { Button } from '@headlessui/react';
 import { TopBar, MainContent } from '@/components/layout';
 import useJob from '@/hooks/useJob';
 import SampleImages, { SampleImagesMenu } from '@/components/SampleImages';
 import JobOverview from '@/components/JobOverview';
-import { redirect } from 'next/navigation';
+import { redirect, useRouter, useSearchParams } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
 import JobLossGraph from '@/components/JobLossGraph';
@@ -18,6 +18,7 @@ import { Job } from '@prisma/client';
 import { JobConfig } from '@/types';
 
 type PageKey = 'overview' | 'samples' | 'depth_previews' | 'config' | 'loss_log' | 'metrics_new' | 'metrics_compare';
+const PAGE_KEYS = new Set<PageKey>(['overview', 'samples', 'depth_previews', 'config', 'loss_log', 'metrics_new', 'metrics_compare']);
 
 interface Page {
   name: string;
@@ -96,7 +97,20 @@ export default function JobPage({ params }: { params: { jobID: string } }) {
   const usableParams = use(params as any) as { jobID: string };
   const jobID = usableParams.jobID;
   const { job, status, refreshJob } = useJob(jobID, 5000);
-  const [pageKey, setPageKey] = useState<PageKey>('overview');
+
+  // Tab selection lives in the URL (`?tab=…`) so refresh + tab-switch-and-return
+  // both preserve it, and the URL is shareable. Per-tab interior state (filters,
+  // sort, etc.) is the tab component's own responsibility — see DepthPreviews
+  // for the pattern.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const rawTab = searchParams.get('tab');
+  const pageKey: PageKey = rawTab && PAGE_KEYS.has(rawTab as PageKey) ? (rawTab as PageKey) : 'overview';
+  const setPageKey = (k: PageKey) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('tab', k);
+    router.replace(`?${params.toString()}`, { scroll: false });
+  };
 
   const visiblePages = useMemo(() => (job ? pages.filter(p => !p.condition || p.condition(job)) : pages.filter(p => !p.condition)), [job]);
   // If the previously selected tab no longer applies (e.g. preview_every was
