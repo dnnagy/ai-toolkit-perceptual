@@ -1,3 +1,5 @@
+import os
+
 from .flux2_model import Flux2Model
 from transformers import Qwen3ForCausalLM, Qwen2Tokenizer
 from optimum.quanto import freeze
@@ -6,6 +8,7 @@ from toolkit.config_modules import ModelConfig
 from toolkit.memory_management.manager import MemoryManager
 from toolkit.basic import flush
 from .src.model import Klein9BParams, Klein4BParams
+from safetensors.torch import load_file
 
 
 class Flux2KleinModel(Flux2Model):
@@ -46,10 +49,25 @@ class Flux2KleinModel(Flux2Model):
         dtype = self.torch_dtype
         self.print_and_status_update(f"Loading text encoder from {te_path}")
 
-        text_encoder: Qwen3ForCausalLM = Qwen3ForCausalLM.from_pretrained(
-            te_path,
-            torch_dtype=dtype,
-        )
+        te_base_path = self.flux2_klein_te_path
+        if te_base_path is None:
+            raise ValueError("flux2_klein_te_path must be set for Flux2KleinModel")
+
+        if os.path.isfile(te_path):
+            text_encoder: Qwen3ForCausalLM = Qwen3ForCausalLM.from_pretrained(
+                te_base_path,
+                torch_dtype=dtype,
+            )
+            te_state_dict = load_file(te_path, device="cpu")
+            for key in te_state_dict:
+                te_state_dict[key] = te_state_dict[key].to(dtype)
+            text_encoder.load_state_dict(te_state_dict, assign=True, strict=True)
+            del te_state_dict
+        else:
+            text_encoder: Qwen3ForCausalLM = Qwen3ForCausalLM.from_pretrained(
+                te_path,
+                torch_dtype=dtype,
+            )
         text_encoder.to(self.device_torch, dtype=dtype)
 
         flush()
@@ -70,7 +88,8 @@ class Flux2KleinModel(Flux2Model):
                 offload_percent=self.model_config.layer_offloading_text_encoder_percent,
             )
 
-        tokenizer = Qwen2Tokenizer.from_pretrained(te_path)
+        tokenizer_path = te_base_path if os.path.isfile(te_path) else te_path
+        tokenizer = Qwen2Tokenizer.from_pretrained(tokenizer_path)
         return text_encoder, tokenizer
 
 
