@@ -19,6 +19,7 @@ These can be used independently or together. Weight noising is the bigger practi
 - [Training Previews](#training-previews): what each anchor saves to disk
 - [Dataset-Tools UI](#dataset-tools-ui): preflight passes for masks, depth, faces
 - [Quickstart Templates](#quickstart-templates): UI presets for validated configs
+- [Tips and Tricks](#tips-and-tricks): empirical patterns from training runs
 - [Examples](#examples)
   - [Sketchwave Style (single-image style LoRA)](#example-sketchwave-style-single-image-style-lora)
   - [Yoshitaka Amano Style (small-dataset style LoRA)](#example-yoshitaka-amano-style-small-dataset-style-lora)
@@ -312,6 +313,49 @@ Current templates:
 - **Subject Likeness (Flux 2 Klein 9B + Weight Noise)**: the full empirically-validated recipe. LoKr (linear/alpha 32, conv/alpha 16, full-rank, factor 8) + weight noise (relative, σ=0.0125) + depth-consistency + subject masking + multi-bucket (`resolution: [512, 768, 1024]`, `num_repeats: [16, 4, 1]`). AdamW8bit @ lr=5e-5, batch=4, 1200 steps. Defaults `model.name_or_path` to the HuggingFace release (`black-forest-labs/FLUX.2-klein-base-9B`) so the template runs without any local checkpoint.
 
 Templates live in `ui/src/app/jobs/new/quickstarts.ts`; adding new ones is a one-export change. The chosen template name shows in the dropdown label and stays there until you pick another. It's not saved to the config; the form *is* the template after apply.
+
+## Tips and Tricks
+
+A few empirically-useful patterns picked up across training runs.
+
+### Subject masking + targeted captions
+
+If you can be disciplined about captioning, combining subject masking with captions that describe **only the changeable parts of the character** (clothing, expression, pose) and skip the background/setting entirely will give noticeably better results. The combination tells the LoRA two things at once:
+
+- *Spatial*: only the subject region carries diffusion gradient (via the mask).
+- *Semantic*: only the captioned attributes are promptable; everything else becomes part of the subject's identity.
+
+Suggested per-region weights when subject masking is on:
+
+```yaml
+datasets:
+  - folder_path: /path/to/subject
+    background_loss_weight: 0     # don't learn the background at all
+    clothing_loss_weight: 1       # full diffusion loss on clothing
+    body_loss_weight: 1           # full diffusion loss on body
+```
+
+The Subject Likeness quickstart template ships with subject masking **off** by default since the "caption everything" workflow is more common. Flip it on in the UI and use these weights when you have the caption discipline to make it count.
+
+### Bucket repeat ratios at scales of 4
+
+When training across multiple resolution buckets, biasing toward lower-res buckets with descending num_repeats in **scales of 4** (e.g. `16:4:1` for 512:768:1024) trains the structural features faster while still anchoring fine detail at the higher-res buckets. The lower-res buckets:
+
+- See each image more often per epoch, pushing coarse structure into the weights early.
+- Are cheaper per step, so the extra repeats are inexpensive.
+
+The higher-res buckets train less frequently but their presence prevents the LoRA from collapsing into "low-res only" generations.
+
+Set the per-resolution `num_repeats` as a list aligned 1:1 with the resolution list:
+
+```yaml
+datasets:
+  - folder_path: /path/to/data
+    resolution: [512, 768, 1024]
+    num_repeats: [16, 4, 1]
+```
+
+The Subject Likeness quickstart uses exactly this ratio.
 
 ## Examples
 
