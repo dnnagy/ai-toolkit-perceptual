@@ -189,7 +189,11 @@ const subjectLikenessFlux2Klein9b: QuickstartTemplate = {
               loss_weight: 0.005,
               input_size: 518,
               preview_every: 1,
-              mask_source: 'subject',
+              // Full-image depth loss — assumes captions describe everything
+              // worth preserving. Switch to 'subject' or 'body' (and enable
+              // subject_mask below) if the dataset has un-captioned background
+              // content you want masked out.
+              mask_source: 'none',
               loss_max_t: 1,
               model_id: 'depth-anything/Depth-Anything-V2-Large-hf',
               loss_min_t: 0,
@@ -199,7 +203,10 @@ const subjectLikenessFlux2Klein9b: QuickstartTemplate = {
               grad_scales: 6,
             },
             subject_mask: {
-              enabled: true,
+              // Off by default in this template. With descriptive captions the
+              // mask isn't doing much, and skipping it avoids the preflight
+              // pass + per-image SegFormer cache.
+              enabled: false,
               background_loss_weight: 0,
               clothing_loss_weight: 1,
               save_debug_previews: true,
