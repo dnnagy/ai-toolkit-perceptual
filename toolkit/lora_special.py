@@ -498,6 +498,16 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 if self.is_pixart:
                     replace_modules = ["T5EncoderModel"]
 
+                if self.is_flux:
+                    replace_modules = [
+                        "MistralAttention",
+                        "MistralMLP",
+                        "Qwen2Attention",
+                        "Qwen2MLP",
+                        "Qwen3Attention",
+                        "Qwen3MLP",
+                    ]
+
                 text_encoder_loras, skipped = create_modules(False, index, text_encoder, replace_modules)
                 self.text_encoder_loras.extend(text_encoder_loras)
                 skipped_te += skipped
