@@ -1,6 +1,6 @@
 import math
 import os
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import huggingface_hub
 import torch
@@ -491,6 +491,66 @@ class Flux2Model(BaseModel):
     def get_transformer_block_names(self) -> Optional[List[str]]:
         return ["double_blocks", "single_blocks"]
 
+    def _build_comfy_lora_decode_map(self, module) -> Dict[str, str]:
+        if module is None:
+            return {}
+
+        decode_map: Dict[str, str] = {}
+        collisions = set()
+        for key in module.state_dict().keys():
+            if not key.endswith(".weight"):
+                continue
+            module_key = key[:-len(".weight")]
+            compressed_key = module_key.replace(".", "_")
+            existing = decode_map.get(compressed_key)
+            if existing is not None and existing != module_key:
+                collisions.add(compressed_key)
+                continue
+            decode_map[compressed_key] = module_key
+
+        for collision in collisions:
+            decode_map.pop(collision, None)
+
+        return decode_map
+
+    def _convert_comfy_key_with_prefix(
+        self,
+        key: str,
+        prefix: str,
+        target_prefix: str,
+        decode_map: Dict[str, str],
+    ) -> Optional[str]:
+        if not key.startswith(prefix):
+            return None
+
+        suffix_start = key.find(".", len(prefix))
+        if suffix_start == -1:
+            return None
+
+        compressed_module_key = key[len(prefix):suffix_start]
+        module_suffix = key[suffix_start:]
+        decoded_module_key = decode_map.get(compressed_module_key)
+        if decoded_module_key is None:
+            return None
+
+        return f"{target_prefix}.{decoded_module_key}{module_suffix}"
+
+    def _split_adapter_suffix(self, key: str) -> Optional[tuple[str, str]]:
+        for token in [
+            ".lora_down.weight",
+            ".lora_up.weight",
+            ".lora_A.weight",
+            ".lora_B.weight",
+            ".alpha",
+            ".dora_scale",
+        ]:
+            if key.endswith(token):
+                return key[:-len(token)], token
+        lokr_pos = key.find(".lokr_")
+        if lokr_pos != -1:
+            return key[:lokr_pos], key[lokr_pos:]
+        return None
+
     def convert_lora_weights_before_save(self, state_dict):
         new_sd = {}
         for key, value in state_dict.items():
@@ -499,9 +559,73 @@ class Flux2Model(BaseModel):
         return new_sd
 
     def convert_lora_weights_before_load(self, state_dict):
+        transformer_decode_map = self._build_comfy_lora_decode_map(self.unet)
+        transformer_module_paths = set(transformer_decode_map.values())
+        text_encoder_decode_map: Dict[str, str] = {}
+        text_encoder_module_paths = set()
+        if self.text_encoder is not None:
+            if isinstance(self.text_encoder, list):
+                for text_encoder in self.text_encoder:
+                    text_encoder_decode_map.update(self._build_comfy_lora_decode_map(text_encoder))
+            else:
+                text_encoder_decode_map = self._build_comfy_lora_decode_map(self.text_encoder)
+            text_encoder_module_paths = set(text_encoder_decode_map.values())
+
         new_sd = {}
         for key, value in state_dict.items():
             new_key = key.replace("diffusion_model.", "transformer.")
+            if new_key.startswith("unet."):
+                new_key = new_key.replace("unet.", "transformer.", 1)
+
+            converted_key = self._convert_comfy_key_with_prefix(
+                new_key,
+                prefix="lora_transformer_",
+                target_prefix="transformer",
+                decode_map=transformer_decode_map,
+            )
+            if converted_key is not None:
+                new_key = converted_key
+            else:
+                converted_key = self._convert_comfy_key_with_prefix(
+                    new_key,
+                    prefix="lycoris_",
+                    target_prefix="transformer",
+                    decode_map=transformer_decode_map,
+                )
+                if converted_key is not None:
+                    new_key = converted_key
+                else:
+                    converted_key = self._convert_comfy_key_with_prefix(
+                        new_key,
+                        prefix="lora_te_",
+                        target_prefix="lora_te",
+                        decode_map=text_encoder_decode_map,
+                    )
+                    if converted_key is not None:
+                        new_key = converted_key
+                    else:
+                        for te_prefix in ["lora_te1_", "lora_te2_", "lora_te3_"]:
+                            converted_key = self._convert_comfy_key_with_prefix(
+                                new_key,
+                                prefix=te_prefix,
+                                target_prefix="lora_te",
+                                decode_map=text_encoder_decode_map,
+                            )
+                            if converted_key is not None:
+                                new_key = converted_key
+                                break
+
+            if new_key.startswith("text_encoders."):
+                new_key = new_key.replace("text_encoders.", "lora_te.", 1)
+
+            split_key = self._split_adapter_suffix(new_key)
+            if split_key is not None:
+                module_path, adapter_suffix = split_key
+                if module_path in transformer_module_paths and not module_path.startswith("transformer."):
+                    new_key = f"transformer.{module_path}{adapter_suffix}"
+                elif module_path in text_encoder_module_paths and not module_path.startswith("lora_te."):
+                    new_key = f"lora_te.{module_path}{adapter_suffix}"
+
             new_sd[new_key] = value
         return new_sd
 

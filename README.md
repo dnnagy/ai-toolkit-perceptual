@@ -564,6 +564,51 @@ Per-step Gaussian noise injected into LoRA **gradients** before `optimizer.step(
 | `gamma` | `0.55` | Anneal exponent for `neelakantan` (paper default). |
 | `log_every` | `50` | Cadence for emitting `grad_noise_snr` and `grad_noise_norm`. |
 
+### `apply_assistant_networks[]` (stack frozen LoRA/LoKr)
+
+Use this to apply one or more **frozen** adapters on top of the base model during training (stacked adapters), while still training your main network normally.
+
+You can define this list either at the root of the YAML or under `model.apply_assistant_networks`. If both are present, the root-level value is used.
+
+```yaml
+apply_assistant_networks:
+  - path: "/path/to/lora.safetensors"
+    strength: 1.0
+  - path: "/path/to/lokr.safetensors"
+    strength: 0.5
+    type: lokr
+```
+
+| Option | Default | What it does, when to use it |
+|---|---|---|
+| `path` | required | Adapter checkpoint path. Supports local `.safetensors`, a directory containing `pytorch_lora_weights.safetensors`, or Hub path in `repo_id/filename` form. |
+| `strength` | `1.0` | Multiplier applied to that assistant adapter. This is equivalent to LoRA strength in ComfyUI. |
+| `type` | auto | `lora` or `lokr`. If omitted, inferred from checkpoint keys. Set explicitly if inference fails. |
+| `apply_transformer` | `true` | Apply adapter to the Flux transformer (DiT). |
+| `apply_text_encoder` | `true` | Apply adapter to the text encoder. Disable for transformer-only assistants. |
+| `lokr_factor` | `-1` | LoKr factorization hint (advanced). Keep default unless you know the adapter's exact factorization assumptions. |
+| `old_lokr_format` | `false` | Enables compatibility mode for older LoKr naming/layout variants. |
+
+Notes:
+
+- Assistant networks are loaded before the trainable network, set to eval mode, and kept frozen (`requires_grad = False`).
+- They stay active during training with their configured `strength`.
+- They are **not** added to optimizer parameter groups and are not the target of checkpoint saves for your trainable adapter.
+
+#### ComfyUI key compatibility
+
+For Flux/Flux2 adapter loading, ComfyUI-style naming conventions are supported when loading assistant adapters, including:
+
+- `transformer.<module_path>.*` (diffusers/simpletrainer style)
+- `diffusion_model.<module_path>.*`
+- `unet.<module_path>.*`
+- `lora_transformer_<module_path_with_underscores>.*` (OneTrainer style)
+- `lycoris_<module_path_with_underscores>.*` (LyCORIS/LoKr style)
+- plain module paths without prefix (DiffSynth-style)
+- text-encoder keys such as `lora_te_*`, `lora_te1_*`, `lora_te2_*`, `lora_te3_*`, and `text_encoders.*`
+
+This is meant to match the Flux mapping behavior in ComfyUI's `comfy/lora.py` as closely as practical for training-time stacking.
+
 ### Per-dataset overrides (`datasets[].*`)
 
 Every entry in `datasets:` accepts these extension-specific overrides. `null` or omitted = inherit the global value.
