@@ -8,7 +8,7 @@ from collections import OrderedDict
 import os
 import re
 import traceback
-from typing import Union, List, Optional
+from typing import Any, Dict, Union, List, Optional
 
 import numpy as np
 import yaml
@@ -19,7 +19,7 @@ from safetensors.torch import save_file, load_file
 from torch.utils.data import DataLoader
 import torch
 import torch.backends.cuda
-from huggingface_hub import HfApi, Repository, interpreter_login
+from huggingface_hub import HfApi, Repository, interpreter_login, hf_hub_download
 from huggingface_hub.utils import HfFolder
 from toolkit.memory_management import MemoryManager
 
@@ -140,6 +140,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # update modelconfig dtype to match train
         model_config['dtype'] = self.train_config.dtype
         self.model_config = ModelConfig(**model_config)
+        self.apply_assistant_networks = self.get_conf('apply_assistant_networks', None)
+        if self.apply_assistant_networks is None:
+            self.apply_assistant_networks = self.model_config.apply_assistant_networks
+        self.assistant_networks: List[LoRASpecialNetwork] = []
 
         self.save_config = SaveConfig(**self.get_conf('save', {}))
         self.sample_config = SampleConfig(**self.get_conf('sample', {}))
@@ -288,6 +292,258 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.current_boundary_index = 0
         self.steps_this_boundary = 0
         self.num_consecutive_oom = 0
+
+    def _normalize_assistant_network_configs(self) -> List[Dict[str, Any]]:
+        raw_configs = self.apply_assistant_networks
+        if raw_configs is None:
+            return []
+        if isinstance(raw_configs, dict):
+            raw_configs = [raw_configs]
+        if not isinstance(raw_configs, list):
+            raise ValueError(
+                "apply_assistant_networks must be a list of mappings, for example "
+                "[{path: '/path/to/lora.safetensors', strength: 1.0}]"
+            )
+
+        normalized_configs: List[Dict[str, Any]] = []
+        for index, raw_config in enumerate(raw_configs):
+            if not isinstance(raw_config, dict):
+                raise ValueError(f"apply_assistant_networks[{index}] must be a mapping")
+            path = raw_config.get("path", None)
+            if path is None or str(path).strip() == "":
+                raise ValueError(f"apply_assistant_networks[{index}].path is required")
+
+            network_type = raw_config.get("type", None)
+            if network_type is not None:
+                network_type = str(network_type).lower()
+
+            normalized_configs.append(
+                {
+                    "path": str(path),
+                    "strength": float(raw_config.get("strength", 1.0)),
+                    "type": network_type,
+                    "apply_transformer": bool(raw_config.get("apply_transformer", True)),
+                    "apply_text_encoder": bool(raw_config.get("apply_text_encoder", True)),
+                    "lokr_factor": int(raw_config.get("lokr_factor", -1)),
+                    "old_lokr_format": bool(raw_config.get("old_lokr_format", False)),
+                }
+            )
+
+        return normalized_configs
+
+    def _resolve_assistant_network_path(self, path: str) -> str:
+        resolved_path = path
+
+        if os.path.isdir(resolved_path):
+            safetensors_path = os.path.join(resolved_path, "pytorch_lora_weights.safetensors")
+            if os.path.exists(safetensors_path):
+                return safetensors_path
+            raise ValueError(
+                f"Assistant network directory does not contain pytorch_lora_weights.safetensors: {resolved_path}"
+            )
+
+        if os.path.isfile(resolved_path):
+            return resolved_path
+
+        path_parts = resolved_path.split("/")
+        if len(path_parts) >= 3:
+            repo_id = "/".join(path_parts[:2])
+            filename = "/".join(path_parts[2:])
+            try:
+                return hf_hub_download(repo_id=repo_id, filename=filename)
+            except Exception as err:
+                raise ValueError(
+                    f"Failed to resolve assistant network path {path}. "
+                    "Use a local safetensors file or a Hub path in repo_id/filename form."
+                ) from err
+
+        raise ValueError(
+            f"Assistant network path not found: {path}. "
+            "Use a local safetensors file or a Hub path in repo_id/filename form."
+        )
+
+    def _infer_assistant_network_type(self, state_dict: Dict[str, torch.Tensor]) -> str:
+        has_lora = any(
+            (
+                ".lora_A.weight" in key
+                or ".lora_B.weight" in key
+                or ".lora_down.weight" in key
+                or ".lora_up.weight" in key
+            )
+            for key in state_dict
+        )
+        has_lokr = any(".lokr_" in key for key in state_dict)
+
+        if has_lora and has_lokr:
+            raise ValueError(
+                "Assistant checkpoint mixes LoRA and LoKr keys. "
+                "Please provide a single adapter type per file."
+            )
+        if has_lokr:
+            return "lokr"
+        if has_lora:
+            return "lora"
+
+        raise ValueError(
+            "Could not infer assistant network type from checkpoint keys. "
+            "Set apply_assistant_networks[].type to 'lora' or 'lokr'."
+        )
+
+    def _infer_assistant_linear_dim(self, state_dict: Dict[str, torch.Tensor], network_type: str) -> Optional[int]:
+        candidate_dims: List[int] = []
+
+        if network_type == "lokr":
+            for key, value in state_dict.items():
+                if key.endswith(".lokr_w2_a") and len(value.shape) >= 2:
+                    candidate_dims.append(int(value.shape[1]))
+                elif key.endswith(".lokr_w2_b") and len(value.shape) >= 2:
+                    candidate_dims.append(int(value.shape[0]))
+                elif key.endswith(".lokr_t2") and len(value.shape) >= 1:
+                    candidate_dims.append(int(value.shape[0]))
+                elif key.endswith(".lokr_w1_a") and len(value.shape) >= 2:
+                    candidate_dims.append(int(value.shape[1]))
+                elif key.endswith(".lokr_w1_b") and len(value.shape) >= 2:
+                    candidate_dims.append(int(value.shape[0]))
+        else:
+            for key, value in state_dict.items():
+                if (key.endswith(".lora_A.weight") or key.endswith(".lora_down.weight")) and len(value.shape) >= 1:
+                    candidate_dims.append(int(value.shape[0]))
+                elif (key.endswith(".lora_B.weight") or key.endswith(".lora_up.weight")) and len(value.shape) >= 2:
+                    candidate_dims.append(int(value.shape[1]))
+
+        if len(candidate_dims) == 0:
+            if network_type == "lokr":
+                for key, value in state_dict.items():
+                    if key.endswith(".alpha") and torch.is_tensor(value) and value.numel() == 1:
+                        return int(value.item())
+            return None
+
+        return max(set(candidate_dims), key=candidate_dims.count)
+
+    def _infer_assistant_alpha(self, state_dict: Dict[str, torch.Tensor], fallback: float) -> float:
+        for key, value in state_dict.items():
+            if not key.endswith(".alpha"):
+                continue
+            if torch.is_tensor(value) and value.numel() == 1:
+                return float(value.item())
+            if isinstance(value, int) or isinstance(value, float):
+                return float(value)
+        return float(fallback)
+
+    def load_assistant_networks(self, text_encoder, unet):
+        assistant_configs = self._normalize_assistant_network_configs()
+        if len(assistant_configs) == 0:
+            return
+
+        for index, assistant_config in enumerate(assistant_configs):
+            resolved_path = self._resolve_assistant_network_path(assistant_config["path"])
+            print_acc(
+                f"Loading assistant network {index + 1}/{len(assistant_configs)} from {resolved_path}"
+            )
+            state_dict = load_file(resolved_path, device="cpu")
+
+            network_type = assistant_config["type"]
+            if network_type is None:
+                network_type = self._infer_assistant_network_type(state_dict)
+            if network_type not in ["lora", "lokr"]:
+                raise ValueError(
+                    f"Unsupported assistant network type '{network_type}' for {resolved_path}. "
+                    "Supported types: lora, lokr"
+                )
+
+            linear_dim = self._infer_assistant_linear_dim(state_dict, network_type)
+            if linear_dim is None:
+                raise ValueError(
+                    f"Could not infer rank for assistant network: {resolved_path}. "
+                    "Use a standard LoRA/LoKr checkpoint or provide apply_assistant_networks[].type explicitly."
+                )
+
+            linear_alpha = self._infer_assistant_alpha(state_dict, fallback=linear_dim)
+
+            apply_text_encoder = assistant_config["apply_text_encoder"]
+            apply_transformer = assistant_config["apply_transformer"]
+
+            if not apply_text_encoder and not apply_transformer:
+                print_acc(
+                    f"Skipping assistant network {resolved_path} because both apply_text_encoder and apply_transformer are false"
+                )
+                continue
+
+            network_kwargs = {}
+            if hasattr(self.sd, 'target_lora_modules'):
+                network_kwargs['target_lin_modules'] = self.sd.target_lora_modules
+
+            assistant_network_config = NetworkConfig(
+                type=network_type,
+                linear=linear_dim,
+                linear_alpha=linear_alpha,
+                transformer_only=not apply_text_encoder,
+                lokr_factor=assistant_config["lokr_factor"],
+                old_lokr_format=assistant_config["old_lokr_format"],
+            )
+
+            assistant_network = LoRASpecialNetwork(
+                text_encoder=text_encoder,
+                unet=self.sd.get_model_to_train(),
+                lora_dim=assistant_network_config.linear,
+                multiplier=1.0,
+                alpha=assistant_network_config.linear_alpha,
+                train_unet=False,
+                train_text_encoder=False,
+                conv_lora_dim=assistant_network_config.conv,
+                conv_alpha=assistant_network_config.conv_alpha,
+                is_sdxl=self.model_config.is_xl or self.model_config.is_ssd,
+                is_v2=self.model_config.is_v2,
+                is_v3=self.model_config.is_v3,
+                is_pixart=self.model_config.is_pixart,
+                is_auraflow=self.model_config.is_auraflow,
+                is_flux=self.model_config.is_flux,
+                is_lumina2=self.model_config.is_lumina2,
+                is_ssd=self.model_config.is_ssd,
+                is_vega=self.model_config.is_vega,
+                dropout=None,
+                use_text_encoder_1=self.model_config.use_text_encoder_1,
+                use_text_encoder_2=self.model_config.use_text_encoder_2,
+                network_config=assistant_network_config,
+                network_type=assistant_network_config.type,
+                transformer_only=assistant_network_config.transformer_only,
+                is_assistant_adapter=True,
+                is_transformer=self.sd.is_transformer,
+                base_model=self.sd,
+                **network_kwargs,
+            )
+
+            assistant_network.force_to(self.device_torch, dtype=torch.float32)
+            assistant_network.apply_to(
+                text_encoder,
+                unet,
+                apply_text_encoder,
+                apply_transformer,
+            )
+            if len(assistant_network.get_all_modules()) == 0:
+                raise ValueError(
+                    f"Assistant network {resolved_path} did not match any target modules. "
+                    "Check adapter architecture and key format compatibility."
+                )
+
+            try:
+                assistant_network.load_weights(state_dict)
+            except Exception as err:
+                raise ValueError(
+                    f"Failed to load assistant network weights from {resolved_path}. "
+                    "This usually indicates key/shape mismatch between the adapter and base model."
+                ) from err
+
+            assistant_network.requires_grad_(False)
+            assistant_network.eval()
+            assistant_network.multiplier = assistant_config["strength"]
+            assistant_network.is_active = True
+            self.assistant_networks.append(assistant_network)
+
+            print_acc(
+                f"Assistant network loaded: type={network_type}, strength={assistant_config['strength']}, "
+                f"apply_text_encoder={apply_text_encoder}, apply_transformer={apply_transformer}"
+            )
 
     def post_process_generate_image_config_list(self, generate_image_config_list: List[GenerateImageConfig]):
         # override in subclass
@@ -1832,6 +2088,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.hook_after_model_load()
         flush()
         if not self.is_fine_tuning:
+            self.load_assistant_networks(text_encoder, unet)
             if self.network_config is not None:
                 # TODO should we completely switch to LycorisSpecialNetwork?
                 network_kwargs = self.network_config.network_kwargs
