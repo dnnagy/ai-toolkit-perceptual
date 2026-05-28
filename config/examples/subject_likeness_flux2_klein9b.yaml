@@ -22,6 +22,9 @@ config:
   name: ""                                             # FILL IN: training name (folder + filename)
   process:
     - type: "diffusion_trainer"
+      # Relative path resolves to <CWD>/output. The UI defaults to the same
+      # place. On Runpod, /app/ai-toolkit/output is symlinked to
+      # /workspace/output for persistence (see docker/start.sh).
       training_folder: "output"
       sqlite_db_path: "./aitk_db.db"
       device: cuda

@@ -81,7 +81,10 @@ function buildSubjectLikenessConfig(
       process: [
         {
           type: 'diffusion_trainer',
-          training_folder: '/home/z/Documents/repos/ai-toolkit/output',
+          // Relative path resolves to <CWD>/output which is the same place
+          // the UI's defaultTrainFolder points. On Runpod this is symlinked
+          // to /workspace/output for persistence (see docker/start.sh).
+          training_folder: 'output',
           sqlite_db_path: './aitk_db.db',
           device: 'cuda',
           trigger_word: null,
