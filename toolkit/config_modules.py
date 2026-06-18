@@ -708,7 +708,7 @@ class TrainConfig:
         self.latent_perceptual_preview_every: int = kwargs.get('latent_perceptual_preview_every', 500)
 
 
-ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21']
+ModelArch = Literal['sd1', 'sd2', 'sd3', 'sdxl', 'pixart', 'pixart_sigma', 'auraflow', 'flux', 'flex1', 'flex2', 'lumina2', 'vega', 'ssd', 'wan21', 'ideogram4']
 
 
 class ModelConfig:
@@ -738,6 +738,8 @@ class ModelConfig:
         self.lora_path = kwargs.get('lora_path', None)
         # mainly for decompression loras for distilled models
         self.assistant_lora_path = kwargs.get('assistant_lora_path', None)
+        # optional LoRA applied only during the unconditional (negative) CFG pass (Ideogram4)
+        self.unconditional_lora_path = kwargs.get('unconditional_lora_path', None)
         self.inference_lora_path = kwargs.get('inference_lora_path', None)
         self.apply_assistant_networks = kwargs.get('apply_assistant_networks', None)
         self.latent_space_version = kwargs.get('latent_space_version', None)
