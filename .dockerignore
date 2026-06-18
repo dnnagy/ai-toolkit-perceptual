@@ -12,5 +12,7 @@ ui/node_modules
 ui/.next
 output
 output_*
+models
+datasets
 samples
 .DS_Store

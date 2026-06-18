@@ -68,19 +68,15 @@ setup_ssh
 export_env_vars
 
 # Symlink output / datasets / models onto the persistent /workspace volume
-# so training results survive pod restart. The trainer writes to
-# /app/ai-toolkit/<dir> (the UI's default training root); both that path
-# and /workspace/<dir> end up at the same persistent location.
+# so training results survive pod restart. We intentionally do not copy data
+# from the image into /workspace at startup.
 link_to_workspace() {
     local name="$1"
     local app_path="/app/ai-toolkit/${name}"
     local ws_path="/workspace/${name}"
     if [ -d /workspace ]; then
         mkdir -p "${ws_path}"
-        # Preserve anything that the image shipped in /app/ai-toolkit/${name}
-        # by copying it into /workspace on first boot.
-        if [ -d "${app_path}" ] && [ ! -L "${app_path}" ]; then
-            cp -an "${app_path}/." "${ws_path}/" 2>/dev/null || true
+        if [ -e "${app_path}" ] && [ ! -L "${app_path}" ]; then
             rm -rf "${app_path}"
         fi
         ln -sfn "${ws_path}" "${app_path}"
