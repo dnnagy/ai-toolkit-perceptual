@@ -7,7 +7,9 @@ An extension of [AI Toolkit by Ostris](https://github.com/ostris/ai-toolkit) tha
 
 These can be used independently or together. Weight noising is the bigger practical win for subject-likeness LoRAs; perceptual anchoring is the bigger win when you need geometric/structural control.
 
-**Supported models:** SDXL, FLUX.2 Klein 9B
+**Supported models:** SDXL, FLUX.2 Klein 9B, Ideogram 4 (experimental)
+
+> **Ideogram 4** was ported from upstream ai-toolkit into this fork (flow-matching DiT + frozen Qwen3-VL-8B text encoder, FP8 checkpoints, structured-JSON captions). It is wired into the model registry, the UI selector, and the E-LatentLPIPS perceptual-loss encoder auto-detect, so the perceptual / weight-noising regularizers work with it the same way they do for the other models. Treat it as experimental until training runs are validated.
 
 ## Contents
 

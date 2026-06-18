@@ -730,13 +730,31 @@ export const modelArchs: ModelArch[] = [
       'model.qie.match_target_res',
     ],
   },
+  {
+    name: 'ideogram4',
+    label: 'Ideogram 4',
+    group: 'image',
+    defaults: {
+      // default updates when [selected, unselected] in the UI
+      'config.process[0].model.name_or_path': ['ideogram-ai/ideogram-4-fp8', defaultNameOrPath],
+      'config.process[0].model.quantize': [true, false],
+      'config.process[0].model.quantize_te': [true, false],
+      'config.process[0].model.low_vram': [true, false],
+      'config.process[0].sample.sampler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.timestep_type': ['weighted', 'sigmoid'],
+      'config.process[0].model.qtype': ['qfloat8', 'qfloat8'],
+    },
+    disableSections: ['network.conv'],
+    additionalSections: ['model.low_vram', 'model.layer_offloading'],
+  },
 ].sort((a, b) => {
   // Sort by label, case-insensitive
   return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
 }) as any;
 
 // Only expose supported models in the UI selector
-const enabledModelNames = new Set(['sdxl', 'flux2_klein_9b']);
+const enabledModelNames = new Set(['sdxl', 'flux2_klein_9b', 'ideogram4']);
 
 export const groupedModelOptions: GroupedSelectOption[] = modelArchs
   .filter(arch => enabledModelNames.has(arch.name))

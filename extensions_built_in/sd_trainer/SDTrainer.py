@@ -1293,6 +1293,10 @@ class SDTrainer(BaseSDTrainProcess):
                     encoder = 'sd3'
                 elif arch in ('flux', 'flex1', 'flex2'):
                     encoder = 'flux'
+                elif arch in ('ideogram4',):
+                    # 16-channel VAE latents (patchified to 128ch, unpacked back to
+                    # 16ch by the perceptual loss); the 16ch 'flux' encoder fits best.
+                    encoder = 'flux'
                 else:
                     encoder = 'sdxl'  # safe default (4ch)
                 print_acc(f"  Auto-detected E-LatentLPIPS encoder: {encoder} (arch={arch})")
