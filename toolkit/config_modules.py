@@ -740,6 +740,10 @@ class ModelConfig:
         self.assistant_lora_path = kwargs.get('assistant_lora_path', None)
         # optional LoRA applied only during the unconditional (negative) CFG pass (Ideogram4)
         self.unconditional_lora_path = kwargs.get('unconditional_lora_path', None)
+        # optional pass-specific LoRA stacks for Ideogram4. Each entry is a mapping:
+        # {path: "/path/to/lora.safetensors", strength: 1.0}
+        self.conditional_loras = kwargs.get('conditional_loras', None)
+        self.unconditional_loras = kwargs.get('unconditional_loras', None)
         self.inference_lora_path = kwargs.get('inference_lora_path', None)
         self.apply_assistant_networks = kwargs.get('apply_assistant_networks', None)
         self.latent_space_version = kwargs.get('latent_space_version', None)

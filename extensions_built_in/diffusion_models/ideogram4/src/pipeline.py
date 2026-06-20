@@ -375,28 +375,23 @@ class Ideogram4Pipeline:
             )
             uncond_mask = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
 
-        # The unconditional LoRA (if present) must be active *only* on the
-        # unconditional pass. We force it off before each conditional pass since the
-        # outer sampling context (``with network:``) may switch it on globally.
-        uncond_lora = getattr(model, "unconditional_lora", None)
-
         for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:]):
             t01 = sigma.expand(latents.shape[0])
-            if uncond_lora is not None:
-                uncond_lora.is_active = False
+            if hasattr(model, "set_lora_pass"):
+                model.set_lora_pass("conditional")
             v_cond = predict_velocity(
                 transformer, latents.to(dtype), t01, cond_feats, cond_mask
             )
             if do_cfg:
-                if uncond_lora is not None:
-                    uncond_lora.is_active = True
+                if hasattr(model, "set_lora_pass"):
+                    model.set_lora_pass("unconditional")
                 try:
                     v_uncond = predict_velocity(
                         transformer, latents.to(dtype), t01, uncond_feats, uncond_mask
                     )
                 finally:
-                    if uncond_lora is not None:
-                        uncond_lora.is_active = False
+                    if hasattr(model, "set_lora_pass"):
+                        model.set_lora_pass("conditional")
                 v = v_uncond + guidance_scale * (v_cond - v_uncond)
             else:
                 v = v_cond

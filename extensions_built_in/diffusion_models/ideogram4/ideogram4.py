@@ -190,9 +190,12 @@ class Ideogram4Model(BaseModel):
         self._latent_shift = None
         self._latent_scale = None
 
-        # Optional LoRA that is only switched on during the unconditional (negative)
-        # CFG pass. Loaded from model_config.unconditional_lora_path if set; stays
-        # inactive everywhere else (training, conditional pass).
+        # Optional frozen LoRA stacks applied to the shared transformer for
+        # different CFG passes. Conditional stacks stay active during training, so
+        # the newly trained LoRA learns on top of the modified conditional model.
+        self.conditional_loras: List[LoRASpecialNetwork] = []
+        self.unconditional_loras: List[LoRASpecialNetwork] = []
+        # Legacy single unconditional LoRA reference. Kept for older call sites.
         self.unconditional_lora: Optional[LoRASpecialNetwork] = None
 
     @property
@@ -273,48 +276,112 @@ class Ideogram4Model(BaseModel):
         vae.requires_grad_(False)
         return vae
 
-    def load_unconditional_lora(self, transformer: Ideogram4Transformer2DModel):
-        """Load the unconditional-pass LoRA and leave it applied but inactive.
+    def _normalize_pass_lora_configs(self, raw_configs, stack_name: str) -> List[dict]:
+        if raw_configs is None:
+            return []
+        if isinstance(raw_configs, (str, os.PathLike)):
+            raw_configs = [{"path": str(raw_configs)}]
+        elif isinstance(raw_configs, dict):
+            raw_configs = [raw_configs]
+        if not isinstance(raw_configs, list):
+            raise ValueError(f"model.{stack_name}_loras must be a list of mappings")
 
-        The adapter is wired into the transformer via ``apply_to`` (no merge) so
-        the pipeline can flip ``is_active`` on for the unconditional CFG pass only.
-        It never affects the conditional pass or training, where it stays inactive.
-        """
-        lora_path = self.model_config.unconditional_lora_path
-        self.print_and_status_update(f"Loading unconditional LoRA from {lora_path}")
-
-        if not os.path.exists(lora_path):
-            # assume it is a "repo/owner/filename.safetensors" hub path
-            lora_splits = lora_path.split("/")
-            if len(lora_splits) != 3:
+        normalized = []
+        for index, raw_config in enumerate(raw_configs):
+            if isinstance(raw_config, (str, os.PathLike)):
+                raw_config = {"path": str(raw_config)}
+            if not isinstance(raw_config, dict):
                 raise ValueError(
-                    f"Unconditional LoRA path {lora_path} is not a valid local path "
-                    "or hub path."
+                    f"model.{stack_name}_loras[{index}] must be a mapping with path/strength"
                 )
-            repo_id = "/".join(lora_splits[:2])
-            filename = lora_splits[2]
-            try:
-                lora_path = huggingface_hub.hf_hub_download(
-                    repo_id=repo_id, filename=filename, token=HF_TOKEN
-                )
-                self.model_config.unconditional_lora_path = lora_path
-            except Exception as e:
-                raise ValueError(
-                    f"Failed to download unconditional LoRA from {lora_path}: {e}"
-                )
+            lora_path = raw_config.get("path", None)
+            if lora_path is None or str(lora_path).strip() == "":
+                raise ValueError(f"model.{stack_name}_loras[{index}].path is required")
+            normalized.append(
+                {
+                    "path": str(lora_path),
+                    "strength": float(raw_config.get("strength", 1.0)),
+                }
+            )
+        return normalized
 
-        # Detect the LoRA rank from the first down-projection weight in the file.
-        lora_state_dict = load_file(lora_path)
+    def _get_conditional_lora_configs(self) -> List[dict]:
+        return self._normalize_pass_lora_configs(
+            self.model_config.conditional_loras, "conditional"
+        )
+
+    def _get_unconditional_lora_configs(self) -> List[dict]:
+        if self.model_config.unconditional_loras is not None:
+            return self._normalize_pass_lora_configs(
+                self.model_config.unconditional_loras, "unconditional"
+            )
+        if self.model_config.unconditional_lora_path is not None:
+            return [{"path": self.model_config.unconditional_lora_path, "strength": 1.0}]
+        return []
+
+    def _resolve_lora_path(self, lora_path: str) -> str:
+        if os.path.exists(lora_path):
+            return lora_path
+
+        # Hub path form: repo_owner/repo_name/path/to/file.safetensors
+        lora_splits = lora_path.split("/")
+        if len(lora_splits) < 3:
+            raise ValueError(
+                f"LoRA path {lora_path} is not a valid local path or hub path."
+            )
+        repo_id = "/".join(lora_splits[:2])
+        filename = "/".join(lora_splits[2:])
+        try:
+            return huggingface_hub.hf_hub_download(
+                repo_id=repo_id, filename=filename, token=HF_TOKEN
+            )
+        except Exception as e:
+            raise ValueError(f"Failed to download LoRA from {lora_path}: {e}") from e
+
+    @staticmethod
+    def _infer_lora_rank_and_alpha(lora_state_dict: dict, lora_path: str):
         lora_dim = None
+        lora_alpha = None
         for key, value in lora_state_dict.items():
             if key.endswith("lora_A.weight") or key.endswith("lora_down.weight"):
                 lora_dim = int(value.shape[0])
-                break
+                if lora_alpha is not None:
+                    break
+            elif key.endswith(".alpha") and torch.is_tensor(value) and value.numel() == 1:
+                lora_alpha = float(value.item())
+                if lora_dim is not None:
+                    break
+            elif key.endswith(".alpha") and isinstance(value, (int, float)):
+                lora_alpha = float(value)
+                if lora_dim is not None:
+                    break
         if lora_dim is None:
             raise ValueError(
                 f"Could not determine LoRA rank from {lora_path}: no lora_A/lora_down "
                 "weights found."
             )
+        if lora_alpha is None:
+            lora_alpha = float(lora_dim)
+        return lora_dim, lora_alpha
+
+    def _load_pass_lora(
+        self,
+        transformer: Ideogram4Transformer2DModel,
+        lora_config: dict,
+        stack_name: str,
+        index: int,
+        total: int,
+    ) -> LoRASpecialNetwork:
+        requested_path = lora_config["path"]
+        strength = float(lora_config["strength"])
+        lora_path = self._resolve_lora_path(requested_path)
+        self.print_and_status_update(
+            f"Loading {stack_name} LoRA {index + 1}/{total} from {lora_path} "
+            f"with strength {strength}"
+        )
+
+        lora_state_dict = load_file(lora_path)
+        lora_dim, lora_alpha = self._infer_lora_rank_and_alpha(lora_state_dict, lora_path)
 
         # transformer_only=False so every nn.Linear in the model is targeted (not
         # just the transformer blocks) -- the extraction script factors all linears,
@@ -322,17 +389,17 @@ class Ideogram4Model(BaseModel):
         network_config = NetworkConfig(
             type="lora",
             linear=lora_dim,
-            linear_alpha=lora_dim,
+            linear_alpha=lora_alpha,
             transformer_only=False,
         )
         network = LoRASpecialNetwork(
             text_encoder=None,
             unet=transformer,
             lora_dim=lora_dim,
-            multiplier=1.0,
-            alpha=lora_dim,
-            # train_unet just gates module creation here; the network is applied,
-            # kept inactive, and never trained (the pipeline only toggles is_active).
+            multiplier=strength,
+            alpha=lora_alpha,
+            # train_unet just gates module creation here; these networks are frozen
+            # and toggled by pass (conditional/unconditional) instead of trained.
             train_unet=True,
             train_text_encoder=False,
             network_config=network_config,
@@ -347,13 +414,47 @@ class Ideogram4Model(BaseModel):
         network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
         network.force_to(self.device_torch, dtype=self.torch_dtype)
         network._update_torch_multiplier()
-        network.load_weights(lora_path)
+        network.load_weights(lora_state_dict)
+        network.requires_grad_(False)
         network.eval()
-
-        # Inactive by default; the pipeline flips this on only for the uncond pass.
         network.is_active = False
-        self.unconditional_lora = network
-        self.print_and_status_update("Unconditional LoRA loaded (inactive)")
+        return network
+
+    def load_pass_lora_stacks(self, transformer: Ideogram4Transformer2DModel):
+        conditional_configs = self._get_conditional_lora_configs()
+        unconditional_configs = self._get_unconditional_lora_configs()
+
+        self.conditional_loras = [
+            self._load_pass_lora(
+                transformer, lora_config, "conditional", index, len(conditional_configs)
+            )
+            for index, lora_config in enumerate(conditional_configs)
+        ]
+        self.unconditional_loras = [
+            self._load_pass_lora(
+                transformer,
+                lora_config,
+                "unconditional",
+                index,
+                len(unconditional_configs),
+            )
+            for index, lora_config in enumerate(unconditional_configs)
+        ]
+        self.unconditional_lora = (
+            self.unconditional_loras[0] if len(self.unconditional_loras) > 0 else None
+        )
+        self.set_lora_pass("conditional")
+
+    def set_lora_stack_active(self, stack_name: str, is_active: bool):
+        stack = getattr(self, f"{stack_name}_loras", [])
+        for network in stack:
+            network.is_active = is_active
+
+    def set_lora_pass(self, pass_name: str):
+        if pass_name not in ["conditional", "unconditional"]:
+            raise ValueError(f"Unknown Ideogram4 LoRA pass: {pass_name}")
+        self.set_lora_stack_active("conditional", pass_name == "conditional")
+        self.set_lora_stack_active("unconditional", pass_name == "unconditional")
 
     def load_model(self):
         dtype = self.torch_dtype
@@ -430,8 +531,7 @@ class Ideogram4Model(BaseModel):
         self.model = transformer
         self.pipeline = Ideogram4Pipeline(self)
 
-        if self.model_config.unconditional_lora_path is not None:
-            self.load_unconditional_lora(transformer)
+        self.load_pass_lora_stacks(transformer)
 
         self.print_and_status_update("Model Loaded")
 
@@ -493,6 +593,8 @@ class Ideogram4Model(BaseModel):
             text_embeddings.text_embeds, self.device_torch, self.torch_dtype
         )
 
+        # Training optimizes the new LoRA on top of the conditional helper stack.
+        self.set_lora_pass("conditional")
         pred = predict_velocity(
             self.transformer,
             latent_model_input.to(self.device_torch),
