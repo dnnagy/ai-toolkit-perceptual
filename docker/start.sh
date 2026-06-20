@@ -66,5 +66,26 @@ echo "Pod Started"
 
 setup_ssh
 export_env_vars
+
+# Symlink output / datasets / models onto the persistent /workspace volume
+# so training results survive pod restart. We intentionally do not copy data
+# from the image into /workspace at startup.
+link_to_workspace() {
+    local name="$1"
+    local app_path="/app/ai-toolkit/${name}"
+    local ws_path="/workspace/${name}"
+    if [ -d /workspace ]; then
+        mkdir -p "${ws_path}"
+        if [ -e "${app_path}" ] && [ ! -L "${app_path}" ]; then
+            rm -rf "${app_path}"
+        fi
+        ln -sfn "${ws_path}" "${app_path}"
+        echo "Linked ${app_path} -> ${ws_path}"
+    fi
+}
+link_to_workspace output
+link_to_workspace datasets
+link_to_workspace models
+
 echo "Starting AI Toolkit UI..."
-cd /app/ai-toolkit/ui && npm run start 
+cd /app/ai-toolkit/ui && npm run start

@@ -1,21 +1,23 @@
 'use client';
 
-import { useState, use } from 'react';
+import { useMemo, use } from 'react';
 import { FaChevronLeft } from 'react-icons/fa';
 import { Button } from '@headlessui/react';
 import { TopBar, MainContent } from '@/components/layout';
 import useJob from '@/hooks/useJob';
 import SampleImages, { SampleImagesMenu } from '@/components/SampleImages';
 import JobOverview from '@/components/JobOverview';
-import { redirect } from 'next/navigation';
+import { redirect, useRouter, useSearchParams } from 'next/navigation';
 import JobActionBar from '@/components/JobActionBar';
 import JobConfigViewer from '@/components/JobConfigViewer';
-import JobLossGraph from '@/components/JobLossGraph';
 import JobMetricsGraph from '@/components/JobMetricsGraph';
 import JobMetricsCompareGraph from '@/components/JobMetricsCompareGraph';
+import DepthPreviews from '@/components/DepthPreviews';
 import { Job } from '@prisma/client';
+import { JobConfig } from '@/types';
 
-type PageKey = 'overview' | 'samples' | 'config' | 'loss_log' | 'metrics_new' | 'metrics_compare';
+type PageKey = 'overview' | 'samples' | 'depth_previews' | 'config' | 'metrics' | 'metrics_compare';
+const PAGE_KEYS = new Set<PageKey>(['overview', 'samples', 'depth_previews', 'config', 'metrics', 'metrics_compare']);
 
 interface Page {
   name: string;
@@ -23,6 +25,18 @@ interface Page {
   component: React.ComponentType<{ job: Job }>;
   menuItem?: React.ComponentType<{ job?: Job | null }> | null;
   mainCss?: string;
+  /** Hide the tab unless the predicate (run against the loaded job) returns true. */
+  condition?: (job: Job) => boolean;
+}
+
+function hasDepthPreviews(job: Job): boolean {
+  if (!job.job_config) return false;
+  try {
+    const cfg = JSON.parse(job.job_config) as JobConfig;
+    return (cfg.config?.process?.[0]?.depth_consistency?.preview_every ?? 0) > 0;
+  } catch {
+    return false;
+  }
 }
 
 const pages: Page[] = [
@@ -40,17 +54,15 @@ const pages: Page[] = [
     mainCss: 'pt-24',
   },
   {
-    name: 'Loss Graph',
-    value: 'loss_log',
-    component: JobLossGraph,
+    name: 'Depth Previews',
+    value: 'depth_previews',
+    component: DepthPreviews,
     mainCss: 'pt-24',
+    condition: hasDepthPreviews,
   },
   {
-    // Step 5: parallel-installed alongside the legacy "Loss Graph". Reads
-    // the canonical `subsystem/kind/variant` namespace + per-sample
-    // breakdown payloads added in steps 3-4.
-    name: 'Metrics (new)',
-    value: 'metrics_new',
+    name: 'Metrics',
+    value: 'metrics',
     component: JobMetricsGraph,
     mainCss: 'pt-24',
   },
@@ -75,9 +87,26 @@ export default function JobPage({ params }: { params: { jobID: string } }) {
   const usableParams = use(params as any) as { jobID: string };
   const jobID = usableParams.jobID;
   const { job, status, refreshJob } = useJob(jobID, 5000);
-  const [pageKey, setPageKey] = useState<PageKey>('overview');
 
-  const page = pages.find(p => p.value === pageKey);
+  // Tab selection lives in the URL (`?tab=…`) so refresh + tab-switch-and-return
+  // both preserve it, and the URL is shareable. Per-tab interior state (filters,
+  // sort, etc.) is the tab component's own responsibility — see DepthPreviews
+  // for the pattern.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const rawTab = searchParams.get('tab');
+  const pageKey: PageKey = rawTab && PAGE_KEYS.has(rawTab as PageKey) ? (rawTab as PageKey) : 'overview';
+  const setPageKey = (k: PageKey) => {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set('tab', k);
+    router.replace(`?${params.toString()}`, { scroll: false });
+  };
+
+  const visiblePages = useMemo(() => (job ? pages.filter(p => !p.condition || p.condition(job)) : pages.filter(p => !p.condition)), [job]);
+  // If the previously selected tab no longer applies (e.g. preview_every was
+  // turned off after the user landed on it), bounce back to overview.
+  const page = visiblePages.find(p => p.value === pageKey) ?? visiblePages[0];
+  const effectivePageKey = page?.value ?? 'overview';
 
   return (
     <>
@@ -104,26 +133,36 @@ export default function JobPage({ params }: { params: { jobID: string } }) {
           />
         )}
       </TopBar>
-      <MainContent className={pages.find(page => page.value === pageKey)?.mainCss}>
+      <MainContent className={page?.mainCss}>
         {status === 'loading' && job == null && <p>Loading...</p>}
         {status === 'error' && job == null && <p>Error fetching job</p>}
+        {/* All tabs mount once and stay mounted; we hide inactive ones with
+            display:none rather than unmounting so per-tab local state (zoom,
+            selected series, scroll position, etc.) survives a tab switch.
+            Tabs that need to persist across *refresh* still mirror to the
+            URL on their own (see DepthPreviews for the pattern). */}
         {job && (
           <>
-            {pages.map(page => {
-              const Component = page.component;
-              return page.value === pageKey ? <Component key={page.value} job={job} /> : null;
+            {visiblePages.map(p => {
+              const Component = p.component;
+              const isActive = p.value === effectivePageKey;
+              return (
+                <div key={p.value} className={isActive ? 'contents' : 'hidden'} aria-hidden={!isActive}>
+                  <Component job={job} />
+                </div>
+              );
             })}
           </>
         )}
       </MainContent>
       <div className="bg-gray-800 absolute top-12 left-0 w-full h-8 flex items-center px-2 text-sm">
-        {pages.map(page => (
+        {visiblePages.map(p => (
           <Button
-            key={page.value}
-            onClick={() => setPageKey(page.value)}
-            className={`px-4 py-1 h-8  ${page.value === pageKey ? 'bg-gray-300 dark:bg-gray-700' : ''}`}
+            key={p.value}
+            onClick={() => setPageKey(p.value)}
+            className={`px-4 py-1 h-8  ${p.value === effectivePageKey ? 'bg-gray-300 dark:bg-gray-700' : ''}`}
           >
-            {page.name}
+            {p.name}
           </Button>
         ))}
         {page?.menuItem && (

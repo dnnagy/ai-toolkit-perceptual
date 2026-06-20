@@ -46,7 +46,7 @@ scheduler_config = {
     "use_dynamic_shifting": True,
 }
 
-DEFAULT_FLUX2_TE_PATH = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
+MISTRAL_PATH = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 FLUX2_VAE_FILENAME = "ae.safetensors"
 FLUX2_TRANSFORMER_FILENAME = "flux2-dev.safetensors"
 
@@ -55,7 +55,7 @@ HF_TOKEN = os.getenv("HF_TOKEN", None)
 
 class Flux2Model(BaseModel):
     arch = "flux2"
-    flux2_te_type: str = "qwen"  # "mistral" or "qwen"
+    flux2_te_type: str = "mistral"  # "mistral" or "qwen"
     flux2_vae_path: str = None
     flux2_te_filename: str = FLUX2_TRANSFORMER_FILENAME
     flux2_is_guidance_distilled: bool = True
@@ -93,16 +93,11 @@ class Flux2Model(BaseModel):
 
     def load_te(self):
         dtype = self.torch_dtype
-        te_path = (
-            self.model_config.te_name_or_path
-            if self.model_config.te_name_or_path is not None
-            else DEFAULT_FLUX2_TE_PATH
-        )
-        self.print_and_status_update(f"Loading text encoder from {te_path}")
+        self.print_and_status_update("Loading Mistral")
 
         text_encoder: Mistral3ForConditionalGeneration = (
             Mistral3ForConditionalGeneration.from_pretrained(
-                te_path,
+                MISTRAL_PATH,
                 torch_dtype=dtype,
             )
         )
@@ -111,7 +106,7 @@ class Flux2Model(BaseModel):
         flush()
 
         if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing text encoder")
+            self.print_and_status_update("Quantizing Mistral")
             quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
             freeze(text_encoder)
             flush()
@@ -126,7 +121,7 @@ class Flux2Model(BaseModel):
                 offload_percent=self.model_config.layer_offloading_text_encoder_percent,
             )
 
-        tokenizer = AutoProcessor.from_pretrained(te_path)
+        tokenizer = AutoProcessor.from_pretrained(MISTRAL_PATH)
         return text_encoder, tokenizer
 
     def load_model(self):
@@ -135,77 +130,24 @@ class Flux2Model(BaseModel):
         # will be updated if we detect a existing checkpoint in training folder
         model_path = self.model_config.name_or_path
         transformer_path = model_path
-        transformer_filename = (
-            self.model_config.transformer_filename
-            if self.model_config.transformer_filename is not None
-            else self.flux2_te_filename
-        )
-        configured_transformer_path = self.model_config.transformer_path
 
         self.print_and_status_update("Loading transformer")
         with torch.device("meta"):
             transformer = Flux2(self.get_flux2_params())
 
-        if configured_transformer_path is not None:
-            transformer_path = configured_transformer_path
-        elif os.path.isfile(model_path):
-            transformer_path = model_path
-        elif os.path.exists(os.path.join(transformer_path, transformer_filename)):
-            # use local path if provided
-            transformer_path = os.path.join(transformer_path, transformer_filename)
+        # use local path if provided
+        if os.path.exists(os.path.join(transformer_path, self.flux2_te_filename)):
+            transformer_path = os.path.join(transformer_path, self.flux2_te_filename)
 
         if not os.path.exists(transformer_path):
-            if configured_transformer_path is not None or os.path.isfile(model_path):
-                raise FileNotFoundError(
-                    f"Could not find transformer safetensors at: {transformer_path}"
-                )
             # assume it is from the hub
             transformer_path = huggingface_hub.hf_hub_download(
                 repo_id=model_path,
-                filename=transformer_filename,
+                filename=self.flux2_te_filename,
                 token=HF_TOKEN,
             )
 
-        print("DEBUG PID =", os.getpid(), flush=True)
-        print("DEBUG CWD =", os.getcwd(), flush=True)
-        print("DEBUG RANK =", os.environ.get("RANK"), flush=True)
-        print("DEBUG LOCAL_RANK =", os.environ.get("LOCAL_RANK"), flush=True)
-        print("DEBUG WORLD_SIZE =", os.environ.get("WORLD_SIZE"), flush=True)
-        print("DEBUG model_path =", model_path, flush=True)
-        print("DEBUG flux2_te_filename =", self.flux2_te_filename, flush=True)
-        print("DEBUG transformer_path =", transformer_path, flush=True)
-        print("DEBUG exists =", os.path.exists(transformer_path), flush=True)
-        print("DEBUG isfile =", os.path.isfile(transformer_path), flush=True)
-        print("DEBUG islink =", os.path.islink(transformer_path), flush=True)
-        print("DEBUG realpath =", os.path.realpath(transformer_path), flush=True)
-        print(
-            "DEBUG size =",
-            os.path.getsize(transformer_path) if os.path.exists(transformer_path) else None,
-            flush=True,
-        )
-
-        from safetensors.torch import safe_open
-
-        try:
-            with open(transformer_path, "rb") as f:
-                print("DEBUG normal open first16 =", f.read(16), flush=True)
-        except Exception as e:
-            print("DEBUG normal open failed =", repr(e), flush=True)
-
-        try:
-            with safe_open(transformer_path, framework="pt", device="cpu") as f:
-                print("DEBUG safe_open keys =", len(f.keys()), flush=True)
-                print("DEBUG safe_open first keys =", list(f.keys())[:5], flush=True)
-        except Exception as e:
-            print("DEBUG safe_open failed =", repr(e), flush=True)
-            raise
-
-        try:
-            transformer_state_dict = load_file(transformer_path, device="cpu")
-            print("DEBUG load_file OK =", len(transformer_state_dict), flush=True)
-        except Exception as e:
-            print("DEBUG load_file failed =", repr(e), flush=True)
-            raise
+        transformer_state_dict = load_file(transformer_path, device="cpu")
 
         # cast to dtype
         for key in transformer_state_dict:
@@ -244,7 +186,7 @@ class Flux2Model(BaseModel):
         self.print_and_status_update("Loading VAE")
         vae_path = self.model_config.vae_path
 
-        if vae_path is None and os.path.exists(os.path.join(model_path, FLUX2_VAE_FILENAME)):
+        if os.path.exists(os.path.join(model_path, FLUX2_VAE_FILENAME)):
             vae_path = os.path.join(model_path, FLUX2_VAE_FILENAME)
 
         if vae_path is None:

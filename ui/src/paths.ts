@@ -3,3 +3,6 @@ export const TOOLKIT_ROOT = path.resolve('@', '..', '..');
 export const defaultTrainFolder = path.join(TOOLKIT_ROOT, 'output');
 export const defaultDatasetsFolder = path.join(TOOLKIT_ROOT, 'datasets');
 export const defaultDataRoot = path.join(TOOLKIT_ROOT, 'data');
+export const defaultModelsFolder = path.join(TOOLKIT_ROOT, 'models');
+export const defaultTimestepCurvesFolder = path.join(TOOLKIT_ROOT, 'timestep_curves');
+export const defaultTimestepDistributionsFolder = path.join(TOOLKIT_ROOT, 'timestep_distributions');

@@ -9,7 +9,16 @@ from .flux2 import Flux2Model, Flux2Klein4BModel, Flux2Klein9BModel
 from .z_image import ZImageModel
 from .ltx2 import LTX2Model
 from .zeta_chroma import ZetaChromaModel
-from .ideogram4 import Ideogram4Model
+
+# Ideogram4 pulls in Qwen3-VL + transformers.masking_utils. Guard the import so a
+# missing/old optional dependency only disables this one model instead of breaking
+# the entire diffusion_models package (and every other model registered here).
+try:
+    from .ideogram4 import Ideogram4Model
+except Exception as e:  # noqa: BLE001
+    import warnings
+    warnings.warn(f"Ideogram4Model unavailable: {e}")
+    Ideogram4Model = None
 
 AI_TOOLKIT_MODELS = [
     # put a list of models here
@@ -32,5 +41,7 @@ AI_TOOLKIT_MODELS = [
     Flux2Klein4BModel,
     Flux2Klein9BModel,
     ZetaChromaModel,
-    Ideogram4Model,
 ]
+
+if Ideogram4Model is not None:
+    AI_TOOLKIT_MODELS.append(Ideogram4Model)

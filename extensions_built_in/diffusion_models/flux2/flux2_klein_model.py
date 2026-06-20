@@ -43,7 +43,6 @@ class Flux2KleinModel(Flux2Model):
             if self.model_config.te_name_or_path is not None
             else self.flux2_klein_te_path
         )
-
         if te_path is None:
             raise ValueError("flux2_klein_te_path must be set for Flux2KleinModel")
         dtype = self.torch_dtype
@@ -73,7 +72,7 @@ class Flux2KleinModel(Flux2Model):
         flush()
 
         if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing text encoder")
+            self.print_and_status_update("Quantizing Qwen3")
             quantize(text_encoder, weights=get_qtype(self.model_config.qtype))
             freeze(text_encoder)
             flush()
