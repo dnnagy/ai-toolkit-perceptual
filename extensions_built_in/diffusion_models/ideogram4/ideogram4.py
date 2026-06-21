@@ -958,6 +958,59 @@ class Ideogram4Model(BaseModel):
                 only_if_contains.append(contains_key)
         return only_if_contains
 
+    @staticmethod
+    def _adapter_suffix_for_module(suffix: str) -> str:
+        return (
+            suffix.replace("lora_A", "lora_down")
+            .replace("lora_B", "lora_up")
+            .replace("lora_magnitude_vector", "dora_scale")
+        )
+
+    def _load_pass_adapter_weights(
+        self,
+        network: LoRASpecialNetwork,
+        state_dict: dict,
+        lora_path: str,
+    ):
+        adapters = network.get_all_modules()
+        if len(adapters) == 0:
+            filter_preview = network.only_if_contains[:8] if network.only_if_contains else []
+            key_preview = list(state_dict.keys())[:8]
+            raise ValueError(
+                f"No adapter modules were created for {lora_path}. "
+                f"First filters: {filter_preview}. First keys: {key_preview}"
+            )
+
+        loaded = 0
+        for adapter in adapters:
+            module_state_dict = {}
+            prefix_candidates = [adapter.lora_name]
+            dotted_prefix = adapter.lora_name.replace("$$", ".")
+            underscored_prefix = adapter.lora_name.replace("_", ".")
+            for prefix in [dotted_prefix, underscored_prefix]:
+                if prefix not in prefix_candidates:
+                    prefix_candidates.append(prefix)
+
+            for key, value in state_dict.items():
+                for prefix in prefix_candidates:
+                    key_prefix = prefix + "."
+                    if key.startswith(key_prefix):
+                        suffix = key[len(key_prefix) :]
+                        module_state_dict[self._adapter_suffix_for_module(suffix)] = value
+                        break
+
+            if module_state_dict:
+                adapter.load_state_dict(module_state_dict, strict=False)
+                loaded += 1
+
+        if loaded == 0:
+            adapter_preview = [adapter.lora_name for adapter in adapters[:8]]
+            key_preview = list(state_dict.keys())[:8]
+            raise ValueError(
+                f"No weights from {lora_path} matched the created adapter modules. "
+                f"First adapter names: {adapter_preview}. First keys: {key_preview}"
+            )
+
     def _load_pass_lora(
         self,
         transformer: Ideogram4Transformer2DModel,
@@ -1015,7 +1068,7 @@ class Ideogram4Model(BaseModel):
             text_encoder=None,
             unet=transformer,
             lora_dim=lora_dim,
-            multiplier=strength,
+            multiplier=1.0,
             alpha=lora_alpha,
             # train_unet just gates module creation here; these networks are frozen
             # and toggled by pass (conditional/unconditional) instead of trained.
@@ -1033,8 +1086,10 @@ class Ideogram4Model(BaseModel):
         )
         network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
         network.force_to(self.device_torch, dtype=self.torch_dtype)
-        network._update_torch_multiplier()
-        network.load_weights(lora_state_dict)
+        self._load_pass_adapter_weights(network, lora_state_dict, lora_path)
+        network.multiplier = strength
+        if network.torch_multiplier is None:
+            network._update_torch_multiplier()
         network.requires_grad_(False)
         network.eval()
         network.is_active = False
