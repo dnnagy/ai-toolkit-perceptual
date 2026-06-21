@@ -1,6 +1,7 @@
 import { JobConfig } from '@/types';
 import { Job } from '@prisma/client';
 import { apiClient } from '@/utils/api';
+import { parseJobConfigText } from '@/utils/jobConfigText';
 
 export const startJob = (jobID: string) => {
   return new Promise<void>((resolve, reject) => {
@@ -67,7 +68,7 @@ export const markJobAsStopped = (jobID: string) => {
 };
 
 export const getJobConfig = (job: Job) => {
-  return JSON.parse(job.job_config) as JobConfig;
+  return parseJobConfigText(job.job_config) as JobConfig;
 };
 
 export const getAvaliableJobActions = (job: Job) => {

@@ -10,6 +10,7 @@ import classNames from 'classnames';
 import { startQueue, stopQueue } from '@/utils/queue';
 import { CgSpinner } from 'react-icons/cg';
 import useGPUInfo from '@/hooks/useGPUInfo';
+import { parseJobConfigText } from '@/utils/jobConfigText';
 
 interface JobsTableProps {
   autoStartQueue?: boolean;
@@ -43,7 +44,7 @@ export default function JobsTable({ onlyActive = false }: JobsTableProps) {
       title: 'Steps',
       key: 'steps',
       render: row => {
-        const jobConfig: JobConfig = JSON.parse(row.job_config);
+        const jobConfig: JobConfig = parseJobConfigText(row.job_config);
         const totalSteps = jobConfig.config.process[0].train.steps;
 
         return (

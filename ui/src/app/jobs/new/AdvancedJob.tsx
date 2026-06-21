@@ -6,6 +6,7 @@ import Editor, { OnMount } from '@monaco-editor/react';
 import type { editor } from 'monaco-editor';
 import { Settings } from '@/hooks/useSettings';
 import { migrateJobConfig } from './jobConfig';
+import { stringifyJobConfig } from '@/utils/jobConfigText';
 
 type Props = {
   jobConfig: JobConfig;
@@ -18,29 +19,74 @@ type Props = {
   gpuList: any;
   datasetOptions: any;
   settings: Settings;
+  yamlConfigText: string | null;
+  onYamlChange: (value: string, isValid: boolean) => void;
 };
 
 const isDev = process.env.NODE_ENV === 'development';
 
-const yamlConfig: YAML.DocumentOptions &
-  YAML.SchemaOptions &
-  YAML.ParseOptions &
-  YAML.CreateNodeOptions &
-  YAML.ToStringOptions = {
-  indent: 2,
-  lineWidth: 999999999999,
-  defaultStringType: 'QUOTE_DOUBLE',
-  defaultKeyType: 'PLAIN',
-  directives: true,
-};
-
-export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props) {
+export default function AdvancedJob({ jobConfig, setJobConfig, settings, yamlConfigText, onYamlChange }: Props) {
   const [editorValue, setEditorValue] = useState<string>('');
-  const lastJobConfigUpdateStringRef = useRef('');
+  const [parseError, setParseError] = useState<string | null>(null);
+  const lastRenderedJobConfigStringRef = useRef('');
+  const lastParsedJobConfigStringRef = useRef('');
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  const isApplyingEditorValueRef = useRef(false);
+  const programmaticEditorValueRef = useRef<string | null>(null);
+  const hasUserEditedRef = useRef(false);
 
   // Track if the editor has been mounted
   const isEditorMounted = useRef(false);
+
+  const getYamlFromJobConfig = (config: JobConfig) => stringifyJobConfig(config);
+
+  const getErrorMessage = (error: unknown) => {
+    if (error instanceof Error) return error.message;
+    return `${error}`;
+  };
+
+  const applyRequiredConfigDefaults = (config: any) => {
+    try {
+      // config.config.process[0].type = 'ui_trainer';
+      config.config.process[0].sqlite_db_path = './aitk_db.db';
+      config.config.process[0].training_folder = settings.TRAINING_FOLDER;
+      config.config.process[0].device = 'cuda';
+      config.config.process[0].performance_log_every = 10;
+    } catch (e) {
+      if (isDev) console.warn(e);
+    }
+
+    return migrateJobConfig(config);
+  };
+
+  const parseYamlJobConfig = (value: string) => {
+    const document = YAML.parseDocument(value, { prettyErrors: true });
+    if (document.errors.length > 0) {
+      throw document.errors[0];
+    }
+
+    const parsed = document.toJS();
+    if (parsed === null || typeof parsed !== 'object') {
+      throw new Error('YAML must contain a job config object.');
+    }
+
+    return applyRequiredConfigDefaults(parsed);
+  };
+
+  const applyEditorValue = (value: string) => {
+    isApplyingEditorValueRef.current = true;
+    programmaticEditorValueRef.current = value;
+    setEditorValue(value);
+
+    const editor = editorRef.current;
+    if (editor && editor.getValue() !== value) {
+      editor.getModel()?.setValue(value);
+    }
+
+    queueMicrotask(() => {
+      isApplyingEditorValueRef.current = false;
+    });
+  };
 
   // Handler for editor mounting
   const handleEditorDidMount: OnMount = editor => {
@@ -49,20 +95,33 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props
 
     // Initial content setup
     try {
-      const yamlContent = YAML.stringify(jobConfig, yamlConfig);
-      setEditorValue(yamlContent);
-      lastJobConfigUpdateStringRef.current = JSON.stringify(jobConfig);
+      const yamlContent = yamlConfigText ?? getYamlFromJobConfig(jobConfig);
+      const jobConfigString = JSON.stringify(jobConfig);
+      applyEditorValue(yamlContent);
+      onYamlChange(yamlContent, true);
+      lastRenderedJobConfigStringRef.current = jobConfigString;
+      lastParsedJobConfigStringRef.current = jobConfigString;
     } catch (e) {
-      console.warn(e);
+      if (isDev) console.warn(e);
     }
   };
 
   useEffect(() => {
-    const lastUpdate = lastJobConfigUpdateStringRef.current;
     const currentUpdate = JSON.stringify(jobConfig);
 
+    // This update came from a valid YAML edit. Keep the user's raw YAML exactly
+    // as typed so comments and block scalar formatting survive the round trip.
+    if (lastParsedJobConfigStringRef.current === currentUpdate) {
+      lastRenderedJobConfigStringRef.current = currentUpdate;
+      return;
+    }
+
     // Skip if no changes or editor not yet mounted
-    if (lastUpdate === currentUpdate || !isEditorMounted.current) {
+    if (lastRenderedJobConfigStringRef.current === currentUpdate || !isEditorMounted.current) {
+      return;
+    }
+
+    if (hasUserEditedRef.current) {
       return;
     }
 
@@ -76,12 +135,13 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props
         const scrollTop = editor.getScrollTop();
 
         // Update content
-        const yamlContent = YAML.stringify(jobConfig, yamlConfig);
+        const yamlContent = getYamlFromJobConfig(jobConfig);
 
         // Only update if the content is actually different
         if (yamlContent !== editor.getValue()) {
           // Set value directly on the editor model instead of using React state
-          editor.getModel()?.setValue(yamlContent);
+          hasUserEditedRef.current = false;
+          applyEditorValue(yamlContent);
 
           // Restore cursor position and selection
           if (position) editor.setPosition(position);
@@ -89,44 +149,50 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props
           editor.setScrollTop(scrollTop);
         }
 
-        lastJobConfigUpdateStringRef.current = currentUpdate;
+        lastRenderedJobConfigStringRef.current = currentUpdate;
+        lastParsedJobConfigStringRef.current = currentUpdate;
       }
     } catch (e) {
-      console.warn(e);
+      if (isDev) console.warn(e);
     }
   }, [jobConfig]);
 
   const handleChange = (value: string | undefined) => {
     if (value === undefined) return;
+    setEditorValue(value);
+
+    if (isApplyingEditorValueRef.current) {
+      return;
+    }
+    if (programmaticEditorValueRef.current !== null) {
+      if (programmaticEditorValueRef.current === value) {
+        programmaticEditorValueRef.current = null;
+        return;
+      }
+      programmaticEditorValueRef.current = null;
+    }
+    hasUserEditedRef.current = true;
 
     try {
-      const parsed = YAML.parse(value);
-      // Don't update jobConfig if the change came from the editor itself
-      // to avoid a circular update loop
-      if (JSON.stringify(parsed) !== lastJobConfigUpdateStringRef.current) {
-        lastJobConfigUpdateStringRef.current = JSON.stringify(parsed);
+      const parsed = parseYamlJobConfig(value);
+      const parsedString = JSON.stringify(parsed);
 
-        // We have to ensure certain things are always set
-        try {
-          // parsed.config.process[0].type = 'ui_trainer';
-          parsed.config.process[0].sqlite_db_path = './aitk_db.db';
-          parsed.config.process[0].training_folder = settings.TRAINING_FOLDER;
-          parsed.config.process[0].device = 'cuda';
-          parsed.config.process[0].performance_log_every = 10;
-        } catch (e) {
-          console.warn(e);
-        }
-        migrateJobConfig(parsed);
+      setParseError(null);
+      onYamlChange(value, true);
+      if (parsedString !== lastParsedJobConfigStringRef.current) {
+        lastParsedJobConfigStringRef.current = parsedString;
         setJobConfig(parsed);
       }
     } catch (e) {
       // Don't update on parsing errors
-      console.warn(e);
+      setParseError(getErrorMessage(e));
+      onYamlChange(value, false);
+      if (isDev) console.warn(e);
     }
   };
 
   return (
-    <>
+    <div className="relative h-full w-full">
       <Editor
         height="100%"
         width="100%"
@@ -141,6 +207,11 @@ export default function AdvancedJob({ jobConfig, setJobConfig, settings }: Props
           automaticLayout: true,
         }}
       />
-    </>
+      {parseError && (
+        <div className="absolute bottom-3 left-3 right-3 rounded-md border border-red-500/40 bg-red-950/95 px-3 py-2 text-sm text-red-100 shadow-lg">
+          {parseError}
+        </div>
+      )}
+    </div>
   );
 }

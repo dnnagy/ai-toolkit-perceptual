@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { defaultJobConfig, defaultDatasetConfig, migrateJobConfig } from './jobConfig';
 import { jobTypeOptions } from './options';
@@ -19,6 +19,7 @@ import SimpleJob from './SimpleJob';
 import AdvancedJob from './AdvancedJob';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { apiClient } from '@/utils/api';
+import { parseJobConfigText, stringifyJobConfig } from '@/utils/jobConfigText';
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -35,6 +36,9 @@ export default function TrainingForm() {
   const [showAdvancedView, setShowAdvancedView] = useState(false);
 
   const [jobConfig, setJobConfig] = useNestedState<JobConfig>(objectCopy(defaultJobConfig));
+  const [advancedYamlConfig, setAdvancedYamlConfig] = useState<string | null>(null);
+  const [advancedYamlIsValid, setAdvancedYamlIsValid] = useState(true);
+  const rawYamlJobConfigStringRef = useRef('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
 
   useEffect(() => {
@@ -64,9 +68,12 @@ export default function TrainingForm() {
         .then(data => {
           console.log('Clone Training:', data);
           setGpuIDs(data.gpu_ids);
-          const newJobConfig = migrateJobConfig(JSON.parse(data.job_config));
+          const newJobConfig = migrateJobConfig(parseJobConfigText(data.job_config));
           newJobConfig.config.name = `${newJobConfig.config.name}_copy`;
           setJobConfig(newJobConfig);
+          setAdvancedYamlConfig(stringifyJobConfig(newJobConfig));
+          rawYamlJobConfigStringRef.current = JSON.stringify(newJobConfig);
+          setAdvancedYamlIsValid(true);
         })
         .catch(error => console.error('Error fetching training:', error));
     }
@@ -80,7 +87,11 @@ export default function TrainingForm() {
         .then(data => {
           console.log('Training:', data);
           setGpuIDs(data.gpu_ids);
-          setJobConfig(migrateJobConfig(JSON.parse(data.job_config)));
+          const newJobConfig = migrateJobConfig(parseJobConfigText(data.job_config));
+          setJobConfig(newJobConfig);
+          setAdvancedYamlConfig(data.job_config);
+          rawYamlJobConfigStringRef.current = JSON.stringify(newJobConfig);
+          setAdvancedYamlIsValid(true);
         })
         .catch(error => console.error('Error fetching training:', error));
     }
@@ -95,6 +106,12 @@ export default function TrainingForm() {
   }, [gpuList, isGPUInfoLoaded]);
 
   useEffect(() => {
+    if (showAdvancedView && advancedYamlConfig !== null && advancedYamlIsValid) {
+      rawYamlJobConfigStringRef.current = JSON.stringify(jobConfig);
+    }
+  }, [advancedYamlConfig, advancedYamlIsValid, jobConfig, showAdvancedView]);
+
+  useEffect(() => {
     if (isSettingsLoaded) {
       setJobConfig(settings.TRAINING_FOLDER, 'config.process[0].training_folder');
     }
@@ -102,6 +119,11 @@ export default function TrainingForm() {
 
   const saveJob = async () => {
     if (status === 'saving') return;
+
+    if (showAdvancedView && !advancedYamlIsValid) {
+      alert('The advanced YAML has a parse error. Please fix it before saving.');
+      return;
+    }
 
     // Validate dataset paths before saving
     const defaultPath = defaultDatasetConfig.folder_path;
@@ -114,13 +136,18 @@ export default function TrainingForm() {
     }
 
     setStatus('saving');
+    const currentJobConfigString = JSON.stringify(jobConfig);
+    const canSaveRawYaml =
+      advancedYamlConfig !== null &&
+      advancedYamlIsValid &&
+      (showAdvancedView || rawYamlJobConfigStringRef.current === currentJobConfigString);
 
     apiClient
       .post('/api/jobs', {
         id: runId,
         name: jobConfig.config.name,
         gpu_ids: gpuIDs,
-        job_config: jobConfig,
+        job_config: canSaveRawYaml ? advancedYamlConfig : stringifyJobConfig(jobConfig),
       })
       .then(res => {
         setStatus('success');
@@ -239,6 +266,11 @@ export default function TrainingForm() {
             gpuList={gpuList}
             datasetOptions={datasetOptions}
             settings={settings}
+            yamlConfigText={advancedYamlConfig}
+            onYamlChange={(value, isValid) => {
+              setAdvancedYamlConfig(value);
+              setAdvancedYamlIsValid(isValid);
+            }}
           />
         </div>
       ) : (

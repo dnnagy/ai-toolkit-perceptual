@@ -4,6 +4,7 @@ import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
 import { TOOLKIT_ROOT, getTrainingFolder, getHFToken } from '../paths';
+import { parseJobConfigText, stringifyJobConfig } from '../jobConfigText';
 const isWindows = process.platform === 'win32';
 
 const startAndWatchJob = (job: Job) => {
@@ -20,7 +21,7 @@ const startAndWatchJob = (job: Job) => {
     }
 
     // make the config file
-    const configPath = path.join(trainingFolder, '.job_config.json');
+    const configPath = path.join(trainingFolder, '.job_config.yml');
 
     //log to path
     const logPath = path.join(trainingFolder, 'log.txt');
@@ -46,11 +47,11 @@ const startAndWatchJob = (job: Job) => {
     }
 
     // update the config dataset path
-    const jobConfig = JSON.parse(job.job_config);
+    const jobConfig = parseJobConfigText(job.job_config);
     jobConfig.config.process[0].sqlite_db_path = path.join(TOOLKIT_ROOT, 'aitk_db.db');
 
     // write the config file
-    fs.writeFileSync(configPath, JSON.stringify(jobConfig, null, 2));
+    fs.writeFileSync(configPath, stringifyJobConfig(jobConfig));
 
     let pythonPath = 'python';
     // use .venv or venv if it exists

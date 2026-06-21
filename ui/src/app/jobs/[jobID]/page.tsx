@@ -15,6 +15,7 @@ import JobMetricsCompareGraph from '@/components/JobMetricsCompareGraph';
 import DepthPreviews from '@/components/DepthPreviews';
 import { Job } from '@prisma/client';
 import { JobConfig } from '@/types';
+import { parseJobConfigText } from '@/utils/jobConfigText';
 
 type PageKey = 'overview' | 'samples' | 'depth_previews' | 'config' | 'metrics' | 'metrics_compare';
 const PAGE_KEYS = new Set<PageKey>(['overview', 'samples', 'depth_previews', 'config', 'metrics', 'metrics_compare']);
@@ -32,7 +33,7 @@ interface Page {
 function hasDepthPreviews(job: Job): boolean {
   if (!job.job_config) return false;
   try {
-    const cfg = JSON.parse(job.job_config) as JobConfig;
+    const cfg = parseJobConfigText(job.job_config) as JobConfig;
     return (cfg.config?.process?.[0]?.depth_consistency?.preview_every ?? 0) > 0;
   } catch {
     return false;

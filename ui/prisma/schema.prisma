@@ -25,7 +25,7 @@ model Job {
   id              String   @id @default(uuid())
   name            String   @unique
   gpu_ids         String
-  job_config      String // JSON string
+  job_config      String // YAML config text; legacy rows may contain JSON
   created_at      DateTime @default(now())
   updated_at      DateTime @updatedAt
   status          String   @default("stopped")

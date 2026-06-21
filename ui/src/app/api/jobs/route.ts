@@ -1,7 +1,19 @@
 import { NextResponse } from 'next/server';
 import { PrismaClient } from '@prisma/client';
+import YAML from 'yaml';
 
 const prisma = new PrismaClient();
+
+const serializeJobConfig = (jobConfig: unknown) => {
+  if (typeof jobConfig === 'string') return jobConfig;
+  return YAML.stringify(jobConfig, {
+    indent: 2,
+    lineWidth: 999999999999,
+    defaultStringType: 'QUOTE_DOUBLE',
+    defaultKeyType: 'PLAIN',
+    directives: true,
+  });
+};
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -37,7 +49,7 @@ export async function POST(request: Request) {
         data: {
           name,
           gpu_ids,
-          job_config: JSON.stringify(job_config),
+          job_config: serializeJobConfig(job_config),
         },
       });
       return NextResponse.json(training);
@@ -55,7 +67,7 @@ export async function POST(request: Request) {
         data: {
           name,
           gpu_ids,
-          job_config: JSON.stringify(job_config),
+          job_config: serializeJobConfig(job_config),
           queue_position: newQueuePosition,
         },
       });

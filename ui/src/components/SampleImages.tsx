@@ -10,6 +10,7 @@ import { apiClient } from '@/utils/api';
 import classNames from 'classnames';
 import { FaCaretDown, FaCaretUp } from 'react-icons/fa';
 import SampleImageViewer from './SampleImageViewer';
+import { parseJobConfigText } from '@/utils/jobConfigText';
 
 interface SampleImagesMenuProps {
   job?: Job | null;
@@ -73,7 +74,7 @@ export default function SampleImages({ job }: SampleImagesProps) {
   const didFirstScroll = useRef(false);
   const numSamples = useMemo(() => {
     if (job?.job_config) {
-      const jobConfig = JSON.parse(job.job_config) as JobConfig;
+      const jobConfig = parseJobConfigText(job.job_config) as JobConfig;
       const sampleConfig = jobConfig.config.process[0].sample;
       const numPrompts = sampleConfig.prompts ? sampleConfig.prompts.length : 0;
       const numSamples = sampleConfig.samples.length;
@@ -238,7 +239,7 @@ export default function SampleImages({ job }: SampleImagesProps) {
 
   const sampleConfig = useMemo(() => {
     if (job?.job_config) {
-      const jobConfig = JSON.parse(job.job_config) as JobConfig;
+      const jobConfig = parseJobConfigText(job.job_config) as JobConfig;
       return jobConfig.config.process[0].sample;
     }
     return null;
