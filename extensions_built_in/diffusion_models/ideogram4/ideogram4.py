@@ -922,6 +922,42 @@ class Ideogram4Model(BaseModel):
             lora_alpha = float(lora_dim)
         return lora_dim, lora_alpha
 
+    @staticmethod
+    def _is_lokr_state_dict(lora_state_dict: dict) -> bool:
+        return any(".lokr_" in key for key in lora_state_dict.keys())
+
+    @staticmethod
+    def _infer_lokr_factor(lora_state_dict: dict, lora_path: str) -> int:
+        largest_factor = 0
+        for key, value in lora_state_dict.items():
+            if ".lokr_w1" in key and torch.is_tensor(value) and value.dim() > 0:
+                largest_factor = max(largest_factor, int(value.shape[0]))
+        if largest_factor <= 0:
+            sample_keys = ", ".join(list(lora_state_dict.keys())[:8])
+            raise ValueError(
+                f"Could not determine LoKR factor from {lora_path}: no lokr_w1 "
+                f"weights found. First keys: {sample_keys}"
+            )
+        return largest_factor
+
+    @staticmethod
+    def _adapter_module_filters(state_dict: dict, network_type: str) -> List[str]:
+        only_if_contains = []
+        split_tokens = (
+            [".lokr_w1", ".lokr_w2", ".lokr_t2"]
+            if network_type == "lokr"
+            else [".lora_", ".lora_A", ".lora_B", ".lora_down", ".lora_up"]
+        )
+        for key in state_dict.keys():
+            contains_key = None
+            for token in split_tokens:
+                if token in key:
+                    contains_key = key.split(token)[0]
+                    break
+            if contains_key is not None and contains_key not in only_if_contains:
+                only_if_contains.append(contains_key)
+        return only_if_contains
+
     def _load_pass_lora(
         self,
         transformer: Ideogram4Transformer2DModel,
@@ -940,17 +976,41 @@ class Ideogram4Model(BaseModel):
 
         lora_state_dict = load_file(lora_path)
         lora_state_dict = self.convert_lora_weights_before_load(lora_state_dict)
-        lora_dim, lora_alpha = self._infer_lora_rank_and_alpha(lora_state_dict, lora_path)
+        if self._is_lokr_state_dict(lora_state_dict):
+            network_type = "lokr"
+            lokr_factor = self._infer_lokr_factor(lora_state_dict, lora_path)
+            lora_dim = 9999999999
+            lora_alpha = 9999999999
+            network_config = NetworkConfig(
+                type=network_type,
+                linear=lora_dim,
+                linear_alpha=lora_alpha,
+                transformer_only=False,
+                lokr_full_rank=True,
+                lokr_factor=lokr_factor,
+                old_lokr_format=False,
+            )
+            self.print_and_status_update(
+                f"  - detected LoKR adapter with factor {lokr_factor}"
+            )
+        else:
+            network_type = "lora"
+            lora_dim, lora_alpha = self._infer_lora_rank_and_alpha(
+                lora_state_dict, lora_path
+            )
 
-        # transformer_only=False so every nn.Linear in the model is targeted (not
-        # just the transformer blocks) -- the extraction script factors all linears,
-        # so the adapter must wrap all of them to load every key.
-        network_config = NetworkConfig(
-            type="lora",
-            linear=lora_dim,
-            linear_alpha=lora_alpha,
-            transformer_only=False,
-        )
+            # transformer_only=False so every nn.Linear in the model is targeted (not
+            # just the transformer blocks) -- the extraction script factors all linears,
+            # so the adapter must wrap all of them to load every key.
+            network_config = NetworkConfig(
+                type=network_type,
+                linear=lora_dim,
+                linear_alpha=lora_alpha,
+                transformer_only=False,
+            )
+        only_if_contains = self._adapter_module_filters(lora_state_dict, network_type)
+        if len(only_if_contains) == 0:
+            only_if_contains = None
         network = LoRASpecialNetwork(
             text_encoder=None,
             unet=transformer,
@@ -962,10 +1022,11 @@ class Ideogram4Model(BaseModel):
             train_unet=True,
             train_text_encoder=False,
             network_config=network_config,
-            network_type="lora",
+            network_type=network_type,
             transformer_only=False,
             is_transformer=True,
             target_lin_modules=self.target_lora_modules,
+            only_if_contains=only_if_contains,
             # base_model_ref lets load_weights run convert_lora_weights_before_load
             # so saved "diffusion_model." keys map back to "transformer.".
             base_model=self,
