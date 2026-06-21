@@ -59,6 +59,7 @@ scheduler_config = {
 # Weight-only FP8 (e4m3) Linear weights carry a per-output-channel float32 scale
 # saved alongside as ``<name>.weight_scale``. Folding it back gives bf16 weights.
 FP8_SCALE_SUFFIX = ".weight_scale"
+COMFY_QUANT_SUFFIX = ".comfy_quant"
 
 # The text encoder is frozen, stock Qwen3-VL-8B-Instruct.
 QWEN3_VL_PATH = "Qwen/Qwen3-VL-8B-Instruct"
@@ -169,14 +170,17 @@ def _dequantize_fp8_state_dict(
             ) from e
 
     num_fp8 = sum(1 for k in state_dict if k.endswith(FP8_SCALE_SUFFIX))
+    num_comfy_quant = sum(1 for k in state_dict if k.endswith(COMFY_QUANT_SUFFIX))
     if num_fp8 > 0:
         print_acc(f"    dequantizing {num_fp8} fp8 weights -> {dtype} on {work_device}")
     else:
         print_acc(f"    casting weights -> {dtype} on {work_device}")
+    if num_comfy_quant > 0:
+        print_acc(f"    ignoring {num_comfy_quant} Comfy quant metadata keys")
 
     out = {}
     for key, tensor in state_dict.items():
-        if key.endswith(FP8_SCALE_SUFFIX):
+        if key.endswith(FP8_SCALE_SUFFIX) or key.endswith(COMFY_QUANT_SUFFIX):
             continue
         scale_key = key + "_scale"
         if key.endswith(".weight") and scale_key in state_dict:
