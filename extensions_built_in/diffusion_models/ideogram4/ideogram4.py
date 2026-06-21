@@ -385,6 +385,10 @@ def _normalize_qwen_text_encoder_state_dict(
             key = "language_model." + key[len("model.") :]
         if has_language_model and key.startswith("language_model.model."):
             key = "language_model." + key[len("language_model.model.") :]
+        if not has_language_model and key.startswith("model."):
+            key = key[len("model.") :]
+        if not has_language_model and key.startswith("language_model."):
+            key = key[len("language_model.") :]
         normalized[key] = tensor
 
     return normalized
@@ -563,12 +567,18 @@ class Ideogram4Model(BaseModel):
             missing_language_keys = [
                 key
                 for key in load_result.missing_keys
-                if key.startswith("language_model.")
+                if (
+                    key.startswith("language_model.")
+                    or key.startswith("model.")
+                    or key == "embed_tokens.weight"
+                    or key.startswith("layers.")
+                    or key.startswith("norm.")
+                )
                 and not key.endswith("rotary_emb.inv_freq")
             ]
             if missing_language_keys:
                 raise ValueError(
-                    "Text encoder safetensors did not match the Qwen3-VL language "
+                    "Text encoder safetensors did not match the configured language "
                     f"model. First missing key: {missing_language_keys[0]}"
                 )
             if load_result.unexpected_keys:
