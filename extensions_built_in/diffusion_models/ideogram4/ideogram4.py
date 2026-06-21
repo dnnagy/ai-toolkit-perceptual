@@ -148,6 +148,26 @@ def _dequantize_fp8_state_dict(
     def _finish(t: torch.Tensor) -> torch.Tensor:
         return t.to("cpu") if low_vram else t
 
+    def _apply_fp8_scale(key: str, weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+        if scale.dim() == 0:
+            return weight * scale
+        if scale.shape == weight.shape:
+            return weight * scale
+        if scale.dim() == 1:
+            if weight.dim() > 0 and scale.numel() == weight.shape[0]:
+                shape = [scale.numel()] + [1] * (weight.dim() - 1)
+                return weight * scale.reshape(shape)
+            if weight.dim() > 0 and scale.numel() == weight.shape[-1]:
+                shape = [1] * (weight.dim() - 1) + [scale.numel()]
+                return weight * scale.reshape(shape)
+        try:
+            return weight * scale
+        except RuntimeError as e:
+            raise ValueError(
+                f"Cannot apply FP8 scale for {key}: weight shape={tuple(weight.shape)}, "
+                f"scale shape={tuple(scale.shape)}"
+            ) from e
+
     num_fp8 = sum(1 for k in state_dict if k.endswith(FP8_SCALE_SUFFIX))
     if num_fp8 > 0:
         print_acc(f"    dequantizing {num_fp8} fp8 weights -> {dtype} on {work_device}")
@@ -162,7 +182,7 @@ def _dequantize_fp8_state_dict(
         if key.endswith(".weight") and scale_key in state_dict:
             w = tensor.to(work_device, torch.float32)
             scale = state_dict[scale_key].to(work_device, torch.float32)
-            out[key] = _finish((w * scale.unsqueeze(1)).to(dtype))
+            out[key] = _finish(_apply_fp8_scale(key, w, scale).to(dtype))
         elif tensor.is_floating_point():
             out[key] = _finish(tensor.to(work_device, dtype))
         else:
