@@ -1,7 +1,10 @@
 import { NextResponse } from 'next/server';
-import { PrismaClient } from '@prisma/client';
+import prisma from '@/server/prisma';
 
-const prisma = new PrismaClient();
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) return error.message;
+  return `${error}`;
+};
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -13,6 +16,6 @@ export async function GET(request: Request) {
     return NextResponse.json({ queues: queues });
   } catch (error) {
     console.error(error);
-    return NextResponse.json({ error: 'Failed to fetch queue' }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to fetch queue', details: getErrorMessage(error) }, { status: 500 });
   }
 }

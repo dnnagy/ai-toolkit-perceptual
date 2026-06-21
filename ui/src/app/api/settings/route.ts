@@ -1,9 +1,12 @@
 import { NextResponse } from 'next/server';
-import { PrismaClient } from '@prisma/client';
 import { defaultTrainFolder, defaultDatasetsFolder } from '@/paths';
 import { flushCache } from '@/server/settings';
+import prisma from '@/server/prisma';
 
-const prisma = new PrismaClient();
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) return error.message;
+  return `${error}`;
+};
 
 export async function GET() {
   try {
@@ -22,7 +25,8 @@ export async function GET() {
     }
     return NextResponse.json(settingsObject);
   } catch (error) {
-    return NextResponse.json({ error: 'Failed to fetch settings' }, { status: 500 });
+    console.error('Failed to fetch settings:', error);
+    return NextResponse.json({ error: 'Failed to fetch settings', details: getErrorMessage(error) }, { status: 500 });
   }
 }
 
@@ -54,6 +58,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (error) {
-    return NextResponse.json({ error: 'Failed to update settings' }, { status: 500 });
+    console.error('Failed to update settings:', error);
+    return NextResponse.json({ error: 'Failed to update settings', details: getErrorMessage(error) }, { status: 500 });
   }
 }

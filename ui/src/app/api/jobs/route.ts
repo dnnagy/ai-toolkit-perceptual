@@ -1,18 +1,14 @@
 import { NextResponse } from 'next/server';
-import { PrismaClient } from '@prisma/client';
-import YAML from 'yaml';
-
-const prisma = new PrismaClient();
+import prisma from '@/server/prisma';
 
 const serializeJobConfig = (jobConfig: unknown) => {
   if (typeof jobConfig === 'string') return jobConfig;
-  return YAML.stringify(jobConfig, {
-    indent: 2,
-    lineWidth: 999999999999,
-    defaultStringType: 'QUOTE_DOUBLE',
-    defaultKeyType: 'PLAIN',
-    directives: true,
-  });
+  return JSON.stringify(jobConfig, null, 2);
+};
+
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) return error.message;
+  return `${error}`;
 };
 
 export async function GET(request: Request) {
@@ -33,7 +29,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ jobs: jobs });
   } catch (error) {
     console.error(error);
-    return NextResponse.json({ error: 'Failed to fetch training data' }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to fetch training data', details: getErrorMessage(error) }, { status: 500 });
   }
 }
 
@@ -80,6 +76,6 @@ export async function POST(request: Request) {
     }
     console.error(error);
     // Handle other errors
-    return NextResponse.json({ error: 'Failed to save training data' }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to save training data', details: getErrorMessage(error) }, { status: 500 });
   }
 }

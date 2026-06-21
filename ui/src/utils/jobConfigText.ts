@@ -1,5 +1,5 @@
 import YAML from 'yaml';
-import { JobConfig } from '@/types';
+import type { JobConfig } from '@/types';
 
 export const yamlConfig: YAML.DocumentOptions &
   YAML.SchemaOptions &

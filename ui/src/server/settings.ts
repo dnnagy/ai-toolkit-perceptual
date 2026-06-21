@@ -1,126 +1,58 @@
-import { PrismaClient } from '@prisma/client';
 import { defaultDatasetsFolder, defaultDataRoot, defaultModelsFolder, defaultTimestepCurvesFolder, defaultTimestepDistributionsFolder } from '@/paths';
 import { defaultTrainFolder } from '@/paths';
 import NodeCache from 'node-cache';
+import prisma from '@/server/prisma';
 
 const myCache = new NodeCache();
-const prisma = new PrismaClient();
 
 export const flushCache = () => {
   myCache.flushAll();
 };
 
+const getSettingValue = async (key: string, fallback: string) => {
+  let value = myCache.get(key) as string;
+  if (value) {
+    return value;
+  }
+
+  try {
+    const row = await prisma.settings.findFirst({
+      where: { key },
+    });
+    value = row?.value && row.value !== '' ? row.value : fallback;
+  } catch (error) {
+    console.error(`Failed to load setting ${key}, using default:`, error);
+    value = fallback;
+  }
+
+  myCache.set(key, value);
+  return value;
+};
+
 export const getDatasetsRoot = async () => {
-  const key = 'DATASETS_FOLDER';
-  let datasetsPath = myCache.get(key) as string;
-  if (datasetsPath) {
-    return datasetsPath;
-  }
-  let row = await prisma.settings.findFirst({
-    where: {
-      key: 'DATASETS_FOLDER',
-    },
-  });
-  datasetsPath = defaultDatasetsFolder;
-  if (row?.value && row.value !== '') {
-    datasetsPath = row.value;
-  }
-  myCache.set(key, datasetsPath);
-  return datasetsPath as string;
+  return getSettingValue('DATASETS_FOLDER', defaultDatasetsFolder);
 };
 
 export const getTrainingFolder = async () => {
-  const key = 'TRAINING_FOLDER';
-  let trainingRoot = myCache.get(key) as string;
-  if (trainingRoot) {
-    return trainingRoot;
-  }
-  let row = await prisma.settings.findFirst({
-    where: {
-      key: key,
-    },
-  });
-  trainingRoot = defaultTrainFolder;
-  if (row?.value && row.value !== '') {
-    trainingRoot = row.value;
-  }
-  myCache.set(key, trainingRoot);
-  return trainingRoot as string;
+  return getSettingValue('TRAINING_FOLDER', defaultTrainFolder);
 };
 
 export const getHFToken = async () => {
-  const key = 'HF_TOKEN';
-  let token = myCache.get(key) as string;
-  if (token) {
-    return token;
-  }
-  let row = await prisma.settings.findFirst({
-    where: {
-      key: key,
-    },
-  });
-  token = '';
-  if (row?.value && row.value !== '') {
-    token = row.value;
-  }
-  myCache.set(key, token);
-  return token;
+  return getSettingValue('HF_TOKEN', '');
 };
 
 export const getModelsRoot = async () => {
-  const key = 'MODELS_FOLDER';
-  let modelsPath = myCache.get(key) as string;
-  if (modelsPath) {
-    return modelsPath;
-  }
-  const row = await prisma.settings.findFirst({
-    where: { key },
-  });
-  modelsPath = defaultModelsFolder;
-  if (row?.value && row.value !== '') {
-    modelsPath = row.value;
-  }
-  myCache.set(key, modelsPath);
-  return modelsPath as string;
+  return getSettingValue('MODELS_FOLDER', defaultModelsFolder);
 };
 
 export const getTimestepCurvesRoot = async () => {
-  const key = 'TIMESTEP_CURVES_FOLDER';
-  let p = myCache.get(key) as string;
-  if (p) return p;
-  const row = await prisma.settings.findFirst({ where: { key } });
-  p = defaultTimestepCurvesFolder;
-  if (row?.value && row.value !== '') p = row.value;
-  myCache.set(key, p);
-  return p as string;
+  return getSettingValue('TIMESTEP_CURVES_FOLDER', defaultTimestepCurvesFolder);
 };
 
 export const getTimestepDistributionsRoot = async () => {
-  const key = 'TIMESTEP_DISTRIBUTIONS_FOLDER';
-  let p = myCache.get(key) as string;
-  if (p) return p;
-  const row = await prisma.settings.findFirst({ where: { key } });
-  p = defaultTimestepDistributionsFolder;
-  if (row?.value && row.value !== '') p = row.value;
-  myCache.set(key, p);
-  return p as string;
+  return getSettingValue('TIMESTEP_DISTRIBUTIONS_FOLDER', defaultTimestepDistributionsFolder);
 };
 
 export const getDataRoot = async () => {
-  const key = 'DATA_ROOT';
-  let dataRoot = myCache.get(key) as string;
-  if (dataRoot) {
-    return dataRoot;
-  }
-  let row = await prisma.settings.findFirst({
-    where: {
-      key: key,
-    },
-  });
-  dataRoot = defaultDataRoot;
-  if (row?.value && row.value !== '') {
-    dataRoot = row.value;
-  }
-  myCache.set(key, dataRoot);
-  return dataRoot;
+  return getSettingValue('DATA_ROOT', defaultDataRoot);
 };

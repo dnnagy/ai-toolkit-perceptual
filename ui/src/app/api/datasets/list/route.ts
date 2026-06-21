@@ -2,13 +2,18 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import { getDatasetsRoot } from '@/server/settings';
 
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) return error.message;
+  return `${error}`;
+};
+
 export async function GET() {
   try {
     let datasetsPath = await getDatasetsRoot();
 
     // if folder doesnt exist, create it
     if (!fs.existsSync(datasetsPath)) {
-      fs.mkdirSync(datasetsPath);
+      fs.mkdirSync(datasetsPath, { recursive: true });
     }
 
     // find all the folders in the datasets folder
@@ -20,6 +25,7 @@ export async function GET() {
 
     return NextResponse.json(folders);
   } catch (error) {
-    return NextResponse.json({ error: 'Failed to fetch datasets' }, { status: 500 });
+    console.error('Failed to fetch datasets:', error);
+    return NextResponse.json({ error: 'Failed to fetch datasets', details: getErrorMessage(error) }, { status: 500 });
   }
 }
