@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import torch
 import yaml
@@ -349,7 +349,7 @@ def _prune_unused_text_encoder_modules(text_encoder: torch.nn.Module):
     # Ideogram4 only consumes the text/language decoder hidden states. When we
     # build from config and load a language-only single-file checkpoint, pruning
     # unused vision modules prevents leftover meta tensors from being moved.
-    for attr in ["visual", "vision_tower", "vision_model"]:
+    for attr in ["visual", "vision_tower", "vision_model", "lm_head"]:
         if hasattr(text_encoder, attr):
             setattr(text_encoder, attr, None)
     if hasattr(text_encoder, "model") and hasattr(text_encoder.model, "vision_tower"):
@@ -372,6 +372,10 @@ def _normalize_qwen_text_encoder_state_dict(
 ) -> dict:
     """Adapt common single-file Qwen key layouts to Ideogram4's text encoder."""
     has_language_model = hasattr(text_encoder, "language_model")
+    has_model = hasattr(text_encoder, "model") and hasattr(
+        text_encoder.model, "embed_tokens"
+    )
+    target_keys = set(text_encoder.state_dict().keys())
     normalized = {}
 
     for key, tensor in state_dict.items():
@@ -379,19 +383,96 @@ def _normalize_qwen_text_encoder_state_dict(
             key = key[len("text_encoder.") :]
         if key.startswith("base_model."):
             key = key[len("base_model.") :]
-        if key == "lm_head.weight" or key.startswith("lm_head."):
+        if key.endswith(COMFY_QUANT_SUFFIX):
+            continue
+        if (
+            key == "lm_head.weight" or key.startswith("lm_head.")
+        ) and key not in target_keys:
             continue
         if has_language_model and key.startswith("model."):
             key = "language_model." + key[len("model.") :]
         if has_language_model and key.startswith("language_model.model."):
             key = "language_model." + key[len("language_model.model.") :]
-        if not has_language_model and key.startswith("model."):
+        if not has_language_model and has_model and key.startswith("language_model."):
+            key = key[len("language_model.") :]
+        if (
+            not has_language_model
+            and has_model
+            and not key.startswith("model.")
+            and (
+                key == "embed_tokens.weight"
+                or key.startswith("layers.")
+                or key.startswith("norm.")
+                or key.startswith("rotary_emb.")
+            )
+        ):
+            key = "model." + key
+        if not has_language_model and not has_model and key.startswith("model."):
             key = key[len("model.") :]
-        if not has_language_model and key.startswith("language_model."):
+        if (
+            not has_language_model
+            and not has_model
+            and key.startswith("language_model.")
+        ):
             key = key[len("language_model.") :]
         normalized[key] = tensor
 
     return normalized
+
+
+def _build_single_file_text_encoder_from_config(
+    config, trust_remote_code: bool
+) -> torch.nn.Module:
+    if getattr(config, "model_type", None) == "qwen3":
+        return AutoModelForCausalLM.from_config(
+            config, trust_remote_code=trust_remote_code
+        )
+    return AutoModel.from_config(config, trust_remote_code=trust_remote_code)
+
+
+def _validate_state_dict_shapes(
+    state_dict: dict, model: torch.nn.Module, context: str
+):
+    target_state_dict = model.state_dict()
+    mismatches = []
+    for key, tensor in state_dict.items():
+        target_tensor = target_state_dict.get(key, None)
+        if target_tensor is None:
+            continue
+        if tuple(tensor.shape) != tuple(target_tensor.shape):
+            mismatches.append(
+                f"{key}: checkpoint {tuple(tensor.shape)} != model {tuple(target_tensor.shape)}"
+            )
+            if len(mismatches) >= 5:
+                break
+    if mismatches:
+        raise ValueError(
+            f"{context} has incompatible tensor shapes. This usually means the "
+            "text encoder file is not a full Transformers-compatible checkpoint "
+            "for the selected text_encoder_builtin/config, or it is a packed Comfy "
+            "quantized format that cannot be loaded by vanilla Qwen3 modules. "
+            "Use a matching non-packed safetensors file or a GGUF file. First "
+            f"mismatches: {'; '.join(mismatches)}"
+        )
+
+
+def _prepare_text_encoder_state_dict(
+    state_dict: dict,
+    text_encoder: torch.nn.Module,
+    dtype: torch.dtype,
+) -> dict:
+    state_dict = _normalize_qwen_text_encoder_state_dict(state_dict, text_encoder)
+    if any(key.endswith(FP8_SCALE_SUFFIX) for key in state_dict):
+        state_dict = _dequantize_fp8_state_dict(
+            state_dict, dtype, torch.device("cpu"), low_vram=True
+        )
+    else:
+        state_dict = {
+            key: tensor.to(dtype) if tensor.is_floating_point() else tensor
+            for key, tensor in state_dict.items()
+        }
+    _validate_state_dict_shapes(state_dict, text_encoder, "Text encoder safetensors")
+    return state_dict
 
 
 def _load_sharded(base, index_path, is_local, prefix="") -> dict:
@@ -550,17 +631,14 @@ class Ideogram4Model(BaseModel):
                 te_base_path, token=HF_TOKEN, trust_remote_code=trust_remote_code
             )
             with init_empty_weights():
-                text_encoder = AutoModel.from_config(
-                    config, trust_remote_code=trust_remote_code
+                text_encoder = _build_single_file_text_encoder_from_config(
+                    config, trust_remote_code
                 )
             self.print_and_status_update(f"  - loading local text encoder weights: {te_path}")
             te_state_dict = load_file(te_path, device="cpu")
-            te_state_dict = _normalize_qwen_text_encoder_state_dict(
-                te_state_dict, text_encoder
+            te_state_dict = _prepare_text_encoder_state_dict(
+                te_state_dict, text_encoder, dtype
             )
-            for key, tensor in te_state_dict.items():
-                if tensor.is_floating_point():
-                    te_state_dict[key] = tensor.to(dtype)
             load_result = text_encoder.load_state_dict(
                 te_state_dict, assign=True, strict=False
             )
@@ -731,12 +809,98 @@ class Ideogram4Model(BaseModel):
             raise ValueError(f"Failed to download LoRA from {lora_path}: {e}") from e
 
     @staticmethod
+    def _normalize_lora_adapter_suffix(key: str) -> str:
+        suffix_map = {
+            ".lora_A.default.weight": ".lora_A.weight",
+            ".lora_B.default.weight": ".lora_B.weight",
+            ".lora_down.default.weight": ".lora_down.weight",
+            ".lora_up.default.weight": ".lora_up.weight",
+            ".lora_magnitude_vector.default.weight": ".dora_scale",
+        }
+        for old_suffix, new_suffix in suffix_map.items():
+            if key.endswith(old_suffix):
+                return key[: -len(old_suffix)] + new_suffix
+        return key
+
+    @staticmethod
+    def _split_adapter_suffix(key: str) -> Optional[tuple[str, str]]:
+        for token in [
+            ".lora_down.weight",
+            ".lora_up.weight",
+            ".lora_A.weight",
+            ".lora_B.weight",
+            ".alpha",
+            ".dora_scale",
+        ]:
+            if key.endswith(token):
+                return key[: -len(token)], token
+        lokr_pos = key.find(".lokr_")
+        if lokr_pos != -1:
+            return key[:lokr_pos], key[lokr_pos:]
+        return None
+
+    @staticmethod
+    def _build_comfy_lora_decode_map(module: torch.nn.Module) -> Dict[str, str]:
+        decode_map: Dict[str, str] = {}
+        collisions = set()
+        for key in module.state_dict().keys():
+            if not key.endswith(".weight"):
+                continue
+            module_key = key[: -len(".weight")]
+            compressed_key = module_key.replace(".", "_")
+            existing = decode_map.get(compressed_key)
+            if existing is not None and existing != module_key:
+                collisions.add(compressed_key)
+                continue
+            decode_map[compressed_key] = module_key
+
+        for collision in collisions:
+            decode_map.pop(collision, None)
+        return decode_map
+
+    @staticmethod
+    def _convert_comfy_key_with_prefix(
+        key: str,
+        prefix: str,
+        target_prefix: str,
+        decode_map: Dict[str, str],
+    ) -> Optional[str]:
+        if not key.startswith(prefix):
+            return None
+
+        suffix_start = key.find(".", len(prefix))
+        if suffix_start == -1:
+            return None
+
+        compressed_module_key = key[len(prefix) : suffix_start]
+        module_suffix = key[suffix_start:]
+        decoded_module_key = decode_map.get(compressed_module_key)
+        if decoded_module_key is None:
+            return None
+
+        return f"{target_prefix}.{decoded_module_key}{module_suffix}"
+
+    @staticmethod
     def _infer_lora_rank_and_alpha(lora_state_dict: dict, lora_path: str):
         lora_dim = None
         lora_alpha = None
         for key, value in lora_state_dict.items():
-            if key.endswith("lora_A.weight") or key.endswith("lora_down.weight"):
+            if (
+                key.endswith("lora_A.weight")
+                or key.endswith("lora_A.default.weight")
+                or key.endswith("lora_down.weight")
+                or key.endswith("lora_down.default.weight")
+            ):
                 lora_dim = int(value.shape[0])
+                if lora_alpha is not None:
+                    break
+            elif (
+                key.endswith("lora_B.weight")
+                or key.endswith("lora_B.default.weight")
+                or key.endswith("lora_up.weight")
+                or key.endswith("lora_up.default.weight")
+            ):
+                lora_dim = int(value.shape[1])
                 if lora_alpha is not None:
                     break
             elif key.endswith(".alpha") and torch.is_tensor(value) and value.numel() == 1:
@@ -748,9 +912,11 @@ class Ideogram4Model(BaseModel):
                 if lora_dim is not None:
                     break
         if lora_dim is None:
+            sample_keys = ", ".join(list(lora_state_dict.keys())[:8])
             raise ValueError(
-                f"Could not determine LoRA rank from {lora_path}: no lora_A/lora_down "
-                "weights found."
+                f"Could not determine LoRA rank from {lora_path}: no supported "
+                "LoRA adapter weights found. Expected lora_A/lora_B or "
+                f"lora_down/lora_up weights. First keys: {sample_keys}"
             )
         if lora_alpha is None:
             lora_alpha = float(lora_dim)
@@ -773,6 +939,7 @@ class Ideogram4Model(BaseModel):
         )
 
         lora_state_dict = load_file(lora_path)
+        lora_state_dict = self.convert_lora_weights_before_load(lora_state_dict)
         lora_dim, lora_alpha = self._infer_lora_rank_and_alpha(lora_state_dict, lora_path)
 
         # transformer_only=False so every nn.Linear in the model is targeted (not
@@ -1124,8 +1291,52 @@ class Ideogram4Model(BaseModel):
         return new_sd
 
     def convert_lora_weights_before_load(self, state_dict):
+        transformer = self.model
+        transformer_decode_map = self._build_comfy_lora_decode_map(transformer)
+        transformer_module_paths = set(transformer_decode_map.values())
+
         new_sd = {}
         for key, value in state_dict.items():
-            new_key = key.replace("diffusion_model.", "transformer.")
+            new_key = self._normalize_lora_adapter_suffix(key)
+            new_key = new_key.replace("diffusion_model.", "transformer.")
+            if new_key.startswith("unet."):
+                new_key = new_key.replace("unet.", "transformer.", 1)
+
+            converted_key = self._convert_comfy_key_with_prefix(
+                new_key,
+                prefix="lora_transformer_",
+                target_prefix="transformer",
+                decode_map=transformer_decode_map,
+            )
+            if converted_key is not None:
+                new_key = converted_key
+            else:
+                converted_key = self._convert_comfy_key_with_prefix(
+                    new_key,
+                    prefix="lora_unet_",
+                    target_prefix="transformer",
+                    decode_map=transformer_decode_map,
+                )
+                if converted_key is not None:
+                    new_key = converted_key
+                else:
+                    converted_key = self._convert_comfy_key_with_prefix(
+                        new_key,
+                        prefix="lycoris_",
+                        target_prefix="transformer",
+                        decode_map=transformer_decode_map,
+                    )
+                    if converted_key is not None:
+                        new_key = converted_key
+
+            split_key = self._split_adapter_suffix(new_key)
+            if split_key is not None:
+                module_path, adapter_suffix = split_key
+                if (
+                    module_path in transformer_module_paths
+                    and not module_path.startswith("transformer.")
+                ):
+                    new_key = f"transformer.{module_path}{adapter_suffix}"
+
             new_sd[new_key] = value
         return new_sd
