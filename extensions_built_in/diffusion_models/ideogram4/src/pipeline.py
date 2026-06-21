@@ -283,6 +283,8 @@ def predict_velocity(
     t: torch.Tensor,  # (B,) toolkit flow time in [0, 1] (1 = pure noise)
     llm_features: torch.Tensor,  # (B, Lt, llm_dim)
     text_mask: torch.Tensor,  # (B, Lt) 1 for real text tokens
+    timestep_mode: str = "upstream",
+    output_mode: str = "upstream",
 ) -> torch.Tensor:
     """Run the transformer on the packed [text | image] sequence.
 
@@ -358,8 +360,18 @@ def predict_velocity(
 
     position_ids = torch.cat([text_pos_3d, image_pos_3d], dim=1)
 
-    # Flip into the model's time convention (t=1 -> clean).
-    model_t = 1.0 - t
+    if timestep_mode in {"upstream", "flip", "one_minus_sigma"}:
+        # Ostris upstream convention: ai-toolkit t=1 is noise, transformer t=1
+        # is clean.
+        model_t = 1.0 - t
+    elif timestep_mode in {"comfy", "sigma", "raw"}:
+        # Comfy ModelSamplingAuraFlow passes sigma through as timestep.
+        model_t = t
+    else:
+        raise ValueError(
+            f"Unknown Ideogram4 timestep mode {timestep_mode!r}. "
+            "Expected 'upstream' or 'comfy'."
+        )
 
     out = transformer(
         llm_features=llm_full,
@@ -372,8 +384,17 @@ def predict_velocity(
 
     image_velocity = out[:, num_text_tokens:]  # (B, Li, 128)
     image_velocity = image_velocity.reshape(b, gh, gw, c).permute(0, 3, 1, 2)
-    # Model predicts clean - noise; negate to return toolkit velocity (noise - clean).
-    return -image_velocity
+    if output_mode in {"upstream", "negated", "clean_minus_noise"}:
+        # Ostris upstream convention: model predicts clean - noise; negate to
+        # return toolkit velocity (noise - clean).
+        return -image_velocity
+    if output_mode in {"comfy", "velocity", "raw", "noise_minus_clean"}:
+        # Comfy CONST sampling treats the model output as the Euler derivative.
+        return image_velocity
+    raise ValueError(
+        f"Unknown Ideogram4 output mode {output_mode!r}. "
+        "Expected 'upstream' or 'comfy'."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +466,16 @@ class Ideogram4Pipeline:
         gh = height // (ae_scale * patch)
         gw = width // (ae_scale * patch)
         latent_channels = transformer.config.in_channels
+        timestep_mode = str(
+            model.model_config.model_kwargs.get(
+                "ideogram_sampling_timestep_mode", "upstream"
+            )
+        ).lower()
+        output_mode = str(
+            model.model_config.model_kwargs.get(
+                "ideogram_sampling_output_mode", "upstream"
+            )
+        ).lower()
 
         do_cfg = guidance_scale > 1.0
 
@@ -495,7 +526,13 @@ class Ideogram4Pipeline:
             if hasattr(model, "set_lora_pass"):
                 model.set_lora_pass("conditional")
             v_cond = predict_velocity(
-                transformer, latents.to(dtype), t01, cond_feats, cond_mask
+                transformer,
+                latents.to(dtype),
+                t01,
+                cond_feats,
+                cond_mask,
+                timestep_mode=timestep_mode,
+                output_mode=output_mode,
             )
             if do_cfg and step_guidance_scale != 1.0:
                 if hasattr(model, "set_lora_pass"):
@@ -507,6 +544,8 @@ class Ideogram4Pipeline:
                         t01,
                         uncond_feats,
                         uncond_mask,
+                        timestep_mode=timestep_mode,
+                        output_mode=output_mode,
                     )
                 finally:
                     if hasattr(model, "set_lora_pass"):
