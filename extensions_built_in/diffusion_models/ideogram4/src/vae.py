@@ -391,6 +391,37 @@ class AutoEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         return next(self.parameters()).dtype
 
+    def normalize(self, z: Tensor) -> Tensor:
+        self.bn.eval()
+        return self.bn(z)
+
+    def inv_normalize(self, z: Tensor) -> Tensor:
+        self.bn.eval()
+        s = torch.sqrt(self.bn.running_var.view(1, -1, 1, 1) + self.bn_eps)
+        m = self.bn.running_mean.view(1, -1, 1, 1)
+        return z * s + m
+
+    def encode(self, x: Tensor) -> Tensor:
+        moments = self.encoder(x)
+        mean = torch.chunk(moments, 2, dim=1)[0]
+        z = rearrange(
+            mean,
+            "... c (i pi) (j pj) -> ... (c pi pj) i j",
+            pi=self.ps[0],
+            pj=self.ps[1],
+        )
+        return self.normalize(z)
+
+    def decode(self, z: Tensor) -> Tensor:
+        z = self.inv_normalize(z)
+        z = rearrange(
+            z,
+            "... (c pi pj) i j -> ... c (i pi) (j pj)",
+            pi=self.ps[0],
+            pj=self.ps[1],
+        )
+        return self.decoder(z)
+
 
 _NUM_RESOLUTIONS = 4
 
