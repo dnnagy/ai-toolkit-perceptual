@@ -536,6 +536,7 @@ class Ideogram4Model(BaseModel):
         self.unconditional_loras: List[LoRASpecialNetwork] = []
         # Legacy single unconditional LoRA reference. Kept for older call sites.
         self.unconditional_lora: Optional[LoRASpecialNetwork] = None
+        self.unconditional_transformer: Optional[Ideogram4Transformer2DModel] = None
         self.text_encoder_is_gguf = False
 
     @property
@@ -692,16 +693,30 @@ class Ideogram4Model(BaseModel):
         text_encoder.requires_grad_(False)
         return tokenizer, text_encoder
 
-    def _load_transformer(self, base: str):
+    def _get_unconditional_transformer_path(self) -> Optional[str]:
+        path = getattr(self.model_config, "unconditional_transformer_path", None)
+        if path:
+            return path
+        return self._get_component_config_path(
+            "unconditional_transformer",
+            ["unconditional_diffusion_model", "unconditional_dit"],
+        )
+
+    def _load_transformer(
+        self,
+        base: str,
+        direct_path: Optional[str] = None,
+        label: str = "transformer",
+    ):
         dtype = self.torch_dtype
-        self.print_and_status_update("Loading transformer")
+        self.print_and_status_update(f"Loading {label}")
 
         transformer_config = Ideogram4Config()
         with torch.device("meta"):
             transformer = Ideogram4Transformer2DModel(transformer_config)
 
-        self.print_and_status_update("  - fetching transformer weights")
-        transformer_path = self._get_component_config_path(
+        self.print_and_status_update(f"  - fetching {label} weights")
+        transformer_path = direct_path or self._get_component_config_path(
             "transformer", ["diffusion_model", "dit"]
         )
         state_dict = _load_component_state_dict(
@@ -711,11 +726,11 @@ class Ideogram4Model(BaseModel):
             direct_path=transformer_path,
             alt_subfolders=["diffusion_models"],
         )
-        self.print_and_status_update("  - dequantizing transformer weights")
+        self.print_and_status_update(f"  - dequantizing {label} weights")
         state_dict = _dequantize_fp8_state_dict(
             state_dict, dtype, self.device_torch, self.model_config.low_vram
         )
-        self.print_and_status_update("  - loading transformer state dict")
+        self.print_and_status_update(f"  - loading {label} state dict")
         transformer.load_state_dict(state_dict, assign=True)
         del state_dict
         flush()
@@ -729,6 +744,42 @@ class Ideogram4Model(BaseModel):
         )
         transformer.rotary_emb.register_buffer("inv_freq", inv_freq, persistent=False)
         return transformer
+
+    def _prepare_transformer_for_runtime(
+        self,
+        transformer: Ideogram4Transformer2DModel,
+        label: str = "transformer",
+    ):
+        dtype = self.torch_dtype
+        if self.model_config.quantize:
+            self.print_and_status_update(f"Quantizing {label}")
+            quantize_model(self, transformer)
+            flush()
+        else:
+            transformer.to(self.device_torch, dtype=dtype)
+        flush()
+
+        if (
+            self.model_config.layer_offloading
+            and self.model_config.layer_offloading_transformer_percent > 0
+        ):
+            MemoryManager.attach(
+                transformer,
+                self.device_torch,
+                offload_percent=self.model_config.layer_offloading_transformer_percent,
+                ignore_modules=[
+                    transformer.rotary_emb.inv_freq,
+                    transformer.input_proj,
+                    transformer.llm_cond_proj,
+                ],
+            )
+        elif self.model_config.low_vram:
+            self.print_and_status_update(f"Moving {label} to CPU")
+            transformer.to("cpu")
+        else:
+            # quantize_model leaves the model on CPU; make sure it lands on device.
+            transformer.to(self.device_torch)
+        flush()
 
     def _load_vae(self, base: str):
         dtype = self.torch_dtype
@@ -1095,9 +1146,14 @@ class Ideogram4Model(BaseModel):
         network.is_active = False
         return network
 
-    def load_pass_lora_stacks(self, transformer: Ideogram4Transformer2DModel):
+    def load_pass_lora_stacks(
+        self,
+        transformer: Ideogram4Transformer2DModel,
+        unconditional_transformer: Optional[Ideogram4Transformer2DModel] = None,
+    ):
         conditional_configs = self._get_conditional_lora_configs()
         unconditional_configs = self._get_unconditional_lora_configs()
+        unconditional_target = unconditional_transformer or transformer
 
         self.conditional_loras = [
             self._load_pass_lora(
@@ -1107,7 +1163,7 @@ class Ideogram4Model(BaseModel):
         ]
         self.unconditional_loras = [
             self._load_pass_lora(
-                transformer,
+                unconditional_target,
                 lora_config,
                 "unconditional",
                 index,
@@ -1137,36 +1193,20 @@ class Ideogram4Model(BaseModel):
         base = self.model_config.name_or_path
 
         transformer = self._load_transformer(base)
-
-        if self.model_config.quantize:
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
-            flush()
-        else:
-            transformer.to(self.device_torch, dtype=dtype)
-        flush()
-
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_transformer_percent > 0
-        ):
-            MemoryManager.attach(
-                transformer,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent,
-                ignore_modules=[
-                    transformer.rotary_emb.inv_freq,
-                    transformer.input_proj,
-                    transformer.llm_cond_proj,
-                ],
+        unconditional_transformer_path = self._get_unconditional_transformer_path()
+        unconditional_transformer = None
+        if unconditional_transformer_path:
+            unconditional_transformer = self._load_transformer(
+                base,
+                direct_path=unconditional_transformer_path,
+                label="unconditional transformer",
             )
-        elif self.model_config.low_vram:
-            self.print_and_status_update("Moving transformer to CPU")
-            transformer.to("cpu")
-        else:
-            # quantize_model leaves the model on CPU; make sure it lands on device.
-            transformer.to(self.device_torch)
-        flush()
+
+        self._prepare_transformer_for_runtime(transformer, "transformer")
+        if unconditional_transformer is not None:
+            self._prepare_transformer_for_runtime(
+                unconditional_transformer, "unconditional transformer"
+            )
 
         tokenizer, text_encoder = self._load_text_encoder(base)
         if self.model_config.quantize_te and not self.text_encoder_is_gguf:
@@ -1206,9 +1246,10 @@ class Ideogram4Model(BaseModel):
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
         self.model = transformer
+        self.unconditional_transformer = unconditional_transformer
         self.pipeline = Ideogram4Pipeline(self)
 
-        self.load_pass_lora_stacks(transformer)
+        self.load_pass_lora_stacks(transformer, unconditional_transformer)
 
         self.print_and_status_update("Model Loaded")
 

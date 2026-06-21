@@ -66,6 +66,62 @@ def get_ideogram4_sigmas(
     return sigmas.to(device=device, dtype=torch.float32)
 
 
+def _time_snr_shift(alpha: float, t: float) -> float:
+    if alpha == 1.0:
+        return t
+    return alpha * t / (1.0 + (alpha - 1.0) * t)
+
+
+def _auraflow_percent_to_sigma(percent: float, shift: float) -> float:
+    """ComfyUI ModelSamplingDiscreteFlow.percent_to_sigma for AuraFlow."""
+    if percent <= 0.0:
+        return 1.0
+    if percent >= 1.0:
+        return 0.0
+    return _time_snr_shift(shift, 1.0 - percent)
+
+
+def _as_cfg_override_list(raw_override) -> list:
+    if raw_override is None:
+        return []
+    if isinstance(raw_override, list):
+        return raw_override
+    return [raw_override]
+
+
+def get_step_guidance_scale(model, sigma: torch.Tensor, default_cfg: float) -> float:
+    """Apply ComfyUI CFGOverride-style guidance changes for the current sigma.
+
+    Comfy's CFGOverride converts start/end percent to sigma through the model's
+    model_sampling object, then temporarily replaces the guider CFG while the
+    current sigma is inside that interval. For AuraFlow, percent_to_sigma uses
+    time_snr_shift(shift, 1 - percent).
+    """
+    model_kwargs = model.model_config.model_kwargs or {}
+    overrides = _as_cfg_override_list(model_kwargs.get("ideogram_cfg_override"))
+    overrides.extend(_as_cfg_override_list(model_kwargs.get("ideogram_cfg_overrides")))
+    if not overrides:
+        return float(default_cfg)
+
+    cfg = float(default_cfg)
+    sigma_value = float(sigma.flatten()[0])
+    default_shift = float(model_kwargs.get("ideogram_model_sampling_shift", 1.0))
+    for override in overrides:
+        if not isinstance(override, dict):
+            continue
+        override_cfg = override.get("cfg", override.get("guidance_scale", None))
+        if override_cfg is None:
+            continue
+        start_percent = float(override.get("start_percent", 0.0))
+        end_percent = float(override.get("end_percent", 1.0))
+        shift = float(override.get("shift", default_shift))
+        sigma_hi = _auraflow_percent_to_sigma(start_percent, shift)
+        sigma_lo = _auraflow_percent_to_sigma(end_percent, shift)
+        if sigma_lo <= sigma_value <= sigma_hi:
+            cfg = float(override_cfg)
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # Latent (un)patchification.
 #
@@ -357,6 +413,17 @@ class Ideogram4Pipeline:
         device = model.device_torch
         dtype = model.torch_dtype
         transformer = model.transformer
+        unconditional_transformer = getattr(model, "unconditional_transformer", None)
+        if unconditional_transformer is None:
+            unconditional_transformer = transformer
+        if getattr(transformer, "device", torch.device("cpu")) == torch.device("cpu"):
+            transformer.to(device)
+        if (
+            unconditional_transformer is not transformer
+            and getattr(unconditional_transformer, "device", torch.device("cpu"))
+            == torch.device("cpu")
+        ):
+            unconditional_transformer.to(device)
         patch = model.patch_size
 
         schedule_mu = float(
@@ -379,10 +446,6 @@ class Ideogram4Pipeline:
         gw = width // (ae_scale * patch)
         latent_channels = transformer.config.in_channels
 
-        # Ideogram uses asymmetric CFG: the unconditional branch is image-only
-        # (no text tokens) with zeroed text features -- it does NOT run a negative
-        # prompt through the text encoder. So we ignore unconditional_embeds and
-        # build an empty (0-length) text sequence for the uncond pass below.
         do_cfg = guidance_scale > 1.0
 
         if latents is None:
@@ -397,34 +460,58 @@ class Ideogram4Pipeline:
             conditional_embeds.text_embeds, device, dtype
         )
         if do_cfg:
-            # Image-only unconditional: zero-length text sequence. predict_velocity
-            # then produces an image-token-only forward pass with zeroed llm
-            # features, matching the reference's asymmetric CFG.
-            batch_size = latents.shape[0]
-            text_dim = cond_feats.shape[-1]
-            uncond_feats = torch.zeros(
-                batch_size, 0, text_dim, device=device, dtype=dtype
-            )
-            uncond_mask = torch.zeros(batch_size, 0, dtype=torch.long, device=device)
+            uncond_mode = str(
+                model.model_config.model_kwargs.get(
+                    "ideogram_unconditional_conditioning", "zeroed"
+                )
+            ).lower()
+            if uncond_mode in {"empty", "image_only", "zero_length"}:
+                # Image-only unconditional: zero-length text sequence. This is
+                # kept for the original lightweight Ostris/reference path.
+                batch_size = latents.shape[0]
+                text_dim = cond_feats.shape[-1]
+                uncond_feats = torch.zeros(
+                    batch_size, 0, text_dim, device=device, dtype=dtype
+                )
+                uncond_mask = torch.zeros(
+                    batch_size, 0, dtype=torch.long, device=device
+                )
+            elif uncond_mode in {"zeroed", "zero", "conditioning_zero_out"}:
+                # ComfyUI ConditioningZeroOut semantics: keep the same token
+                # layout as the positive conditioning but zero the embeddings.
+                uncond_feats = torch.zeros_like(cond_feats)
+                uncond_mask = cond_mask.clone()
+            else:
+                raise ValueError(
+                    "Unknown ideogram_unconditional_conditioning "
+                    f"{uncond_mode!r}. Expected 'zeroed' or 'empty'."
+                )
 
         for sigma, sigma_next in zip(sigmas[:-1], sigmas[1:]):
             t01 = sigma.expand(latents.shape[0])
+            step_guidance_scale = get_step_guidance_scale(
+                model, sigma, guidance_scale
+            )
             if hasattr(model, "set_lora_pass"):
                 model.set_lora_pass("conditional")
             v_cond = predict_velocity(
                 transformer, latents.to(dtype), t01, cond_feats, cond_mask
             )
-            if do_cfg:
+            if do_cfg and step_guidance_scale != 1.0:
                 if hasattr(model, "set_lora_pass"):
                     model.set_lora_pass("unconditional")
                 try:
                     v_uncond = predict_velocity(
-                        transformer, latents.to(dtype), t01, uncond_feats, uncond_mask
+                        unconditional_transformer,
+                        latents.to(dtype),
+                        t01,
+                        uncond_feats,
+                        uncond_mask,
                     )
                 finally:
                     if hasattr(model, "set_lora_pass"):
                         model.set_lora_pass("conditional")
-                v = v_uncond + guidance_scale * (v_cond - v_uncond)
+                v = v_uncond + step_guidance_scale * (v_cond - v_uncond)
             else:
                 v = v_cond
             latents = latents + v.to(torch.float32) * (sigma_next - sigma)

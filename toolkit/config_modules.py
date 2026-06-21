@@ -733,6 +733,7 @@ class ModelConfig:
         self.is_v_pred: bool = kwargs.get('is_v_pred', False)
         self.dtype: str = kwargs.get('dtype', 'float16')
         self.transformer_path = kwargs.get('transformer_path', None)
+        self.unconditional_transformer_path = kwargs.get('unconditional_transformer_path', None)
         self.vae_path = kwargs.get('vae_path', None)
         # kwargs to pass to the model
         self.model_kwargs = kwargs.get("model_kwargs", {})
@@ -762,10 +763,13 @@ class ModelConfig:
 
         has_explicit_model_paths = bool(
             self.transformer_path
+            or self.unconditional_transformer_path
             or self.vae_path
             or self.model_paths.get("transformer")
+            or self.model_paths.get("unconditional_transformer")
             or self.model_paths.get("diffusion_model")
             or self.model_paths.get("dit")
+            or self.model_paths.get("unconditional_dit")
             or self.model_paths.get("vae")
         )
         if self.name_or_path is None and not has_explicit_model_paths:
