@@ -116,7 +116,9 @@ def get_qwen3_vl_features(
     Returns a (B, L, hidden_size * num_layers) tensor (in the encoder's dtype),
     zeroed at non-text (padding) positions.
     """
-    language_model = text_encoder.language_model
+    language_model = getattr(text_encoder, "language_model", None)
+    if language_model is None:
+        language_model = getattr(text_encoder, "model", text_encoder)
 
     inputs_embeds = language_model.embed_tokens(token_ids)
 

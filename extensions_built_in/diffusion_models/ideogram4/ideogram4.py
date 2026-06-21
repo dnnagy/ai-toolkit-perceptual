@@ -3,6 +3,7 @@ from typing import List, Optional
 
 import torch
 import yaml
+from accelerate import init_empty_weights
 from safetensors.torch import load_file, save_file
 
 from toolkit.config_modules import GenerateImageConfig, ModelConfig, NetworkConfig
@@ -23,7 +24,7 @@ from optimum.quanto import freeze, QTensor
 
 import huggingface_hub
 from huggingface_hub.errors import EntryNotFoundError
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from .src.transformer import Ideogram4Config, Ideogram4Transformer2DModel
 from .src.vae import AutoEncoder, AutoEncoderParams, convert_diffusers_state_dict
@@ -61,6 +62,65 @@ FP8_SCALE_SUFFIX = ".weight_scale"
 
 # The text encoder is frozen, stock Qwen3-VL-8B-Instruct.
 QWEN3_VL_PATH = "Qwen/Qwen3-VL-8B-Instruct"
+QWEN3_PATH = "Qwen/Qwen3-8B"
+GEMMA3_12B_IT_PATH = "mlabonne/gemma-3-12b-it-abliterated"
+
+TEXT_ENCODER_ASSET_REPOS = {
+    "qwen3_vl": QWEN3_VL_PATH,
+    "qwen3vl": QWEN3_VL_PATH,
+    "qwen-3-vl": QWEN3_VL_PATH,
+    "qwen3-vl-8b-instruct": QWEN3_VL_PATH,
+    "qwen3": QWEN3_PATH,
+    "qwen-3": QWEN3_PATH,
+    "qwen3-8b": QWEN3_PATH,
+    "gemma3_12b_it": GEMMA3_12B_IT_PATH,
+    "gemma3-12b-it": GEMMA3_12B_IT_PATH,
+    "gemma-3-12b-it": GEMMA3_12B_IT_PATH,
+    "gemma-3-12b-it-abliterated": GEMMA3_12B_IT_PATH,
+}
+
+TEXT_ENCODER_ASSET_DIR = os.path.join(os.path.dirname(__file__), "assets", "text_encoders")
+TEXT_ENCODER_ASSET_LOCAL_DIRS = {
+    "qwen3_vl": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3_vl"),
+    "qwen3vl": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3_vl"),
+    "qwen-3-vl": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3_vl"),
+    "qwen3-vl-8b-instruct": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3_vl"),
+    "qwen3": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3"),
+    "qwen-3": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3"),
+    "qwen3-8b": os.path.join(TEXT_ENCODER_ASSET_DIR, "qwen3"),
+    "gemma3_12b_it": os.path.join(TEXT_ENCODER_ASSET_DIR, "gemma3_12b_it"),
+    "gemma3-12b-it": os.path.join(TEXT_ENCODER_ASSET_DIR, "gemma3_12b_it"),
+    "gemma-3-12b-it": os.path.join(TEXT_ENCODER_ASSET_DIR, "gemma3_12b_it"),
+    "gemma-3-12b-it-abliterated": os.path.join(
+        TEXT_ENCODER_ASSET_DIR, "gemma3_12b_it"
+    ),
+}
+
+TEXT_ENCODER_ASSET_ALLOW_PATTERNS = [
+    "*.json",
+    "*.model",
+    "*.txt",
+    "*.tiktoken",
+    "tokenizer*",
+    "vocab*",
+    "merges.txt",
+    "chat_template*",
+    "preprocessor_config.json",
+    "processor_config.json",
+]
+TEXT_ENCODER_WEIGHT_IGNORE_PATTERNS = [
+    "*.safetensors.index.json",
+    "*.bin.index.json",
+    "*.safetensors",
+    "*.bin",
+    "*.pt",
+    "*.pth",
+    "*.ckpt",
+    "*.gguf",
+    "*.h5",
+    "*.msgpack",
+    "*.onnx",
+]
 
 HF_TOKEN = os.getenv("HF_TOKEN", None)
 
@@ -110,18 +170,91 @@ def _dequantize_fp8_state_dict(
     return out
 
 
-def _load_component_state_dict(base: str, subfolder: str, basename: str) -> dict:
+def _load_safetensors_file(path: str) -> dict:
+    if path.endswith(".safetensors.index.json"):
+        return _load_sharded(os.path.dirname(path), path, is_local=True)
+    if not path.endswith(".safetensors"):
+        raise ValueError(f"Expected a .safetensors file, got: {path}")
+    return load_file(path)
+
+
+def _load_component_local_dir(local_dir: str, basename: str) -> Optional[dict]:
+    index_path = os.path.join(local_dir, f"{basename}.safetensors.index.json")
+    single_path = os.path.join(local_dir, f"{basename}.safetensors")
+    if os.path.exists(index_path):
+        return _load_sharded(local_dir, index_path, is_local=True)
+    if os.path.exists(single_path):
+        return load_file(single_path)
+
+    safetensors_files = sorted(
+        os.path.join(local_dir, filename)
+        for filename in os.listdir(local_dir)
+        if filename.endswith(".safetensors")
+    )
+    if len(safetensors_files) == 1:
+        return load_file(safetensors_files[0])
+    if len(safetensors_files) > 1:
+        raise FileNotFoundError(
+            f"Multiple .safetensors files found in {local_dir}; set an explicit path."
+        )
+    return None
+
+
+def _load_component_state_dict(
+    base: str,
+    subfolder: str,
+    basename: str,
+    direct_path: Optional[str] = None,
+    alt_subfolders: Optional[List[str]] = None,
+) -> dict:
     """Load a component's weights whether local or on the hub, sharded or single."""
     index_name = f"{basename}.safetensors.index.json"
     single_name = f"{basename}.safetensors"
 
-    # Local directory layout: <base>/<subfolder>/<file>
-    local_dir = os.path.join(base, subfolder)
-    if os.path.isdir(local_dir):
-        index_path = os.path.join(local_dir, index_name)
-        if os.path.exists(index_path):
-            return _load_sharded(local_dir, index_path, is_local=True)
-        return load_file(os.path.join(local_dir, single_name))
+    if direct_path:
+        direct_path = os.path.expanduser(str(direct_path))
+        if os.path.isfile(direct_path):
+            print_acc(f"    loading local {subfolder} weights: {direct_path}")
+            return _load_safetensors_file(direct_path)
+        if os.path.isdir(direct_path):
+            print_acc(f"    loading local {subfolder} weights from directory: {direct_path}")
+            state_dict = _load_component_local_dir(direct_path, basename)
+            if state_dict is not None:
+                return state_dict
+            raise FileNotFoundError(
+                f"No {index_name}, {single_name}, or single .safetensors file found in {direct_path}"
+            )
+        raise FileNotFoundError(
+            f"Configured model component path does not exist: {direct_path}"
+        )
+
+    if not base:
+        raise ValueError(
+            f"model.name_or_path is not set, so model.{subfolder}_path must be specified."
+        )
+
+    # Local directory layouts: <base>/<subfolder>/<file>, plus optional aliases
+    # such as ComfyUI's diffusion_models directory for transformer checkpoints.
+    if os.path.isdir(base):
+        candidate_subfolders = [subfolder] + list(alt_subfolders or [])
+        for candidate_subfolder in candidate_subfolders:
+            local_dir = os.path.join(base, candidate_subfolder)
+            if not os.path.isdir(local_dir):
+                continue
+            state_dict = _load_component_local_dir(local_dir, basename)
+            if state_dict is not None:
+                print_acc(f"    loading local {subfolder} weights from directory: {local_dir}")
+                return state_dict
+        searched = ", ".join(os.path.join(base, folder) for folder in candidate_subfolders)
+        raise FileNotFoundError(
+            f"Could not find {subfolder} weights under {searched}. Expected {index_name}, "
+            f"{single_name}, or exactly one .safetensors file."
+        )
+
+    if os.path.isabs(base):
+        raise FileNotFoundError(
+            f"Local model path does not exist: {base}. Set an explicit component path if needed."
+        )
 
     # Hub repo layout: <subfolder>/<file>
     prefix = f"{subfolder}/" if subfolder else ""
@@ -135,6 +268,102 @@ def _load_component_state_dict(base: str, subfolder: str, basename: str) -> dict
             repo_id=base, filename=f"{prefix}{single_name}", token=HF_TOKEN
         )
         return load_file(single_path)
+
+
+def _normalize_asset_key(value: str) -> str:
+    return value.strip().lower().replace(" ", "_").replace("/", "_")
+
+
+def _has_text_encoder_assets(path: str) -> bool:
+    return os.path.exists(os.path.join(path, "config.json")) and (
+        os.path.exists(os.path.join(path, "tokenizer_config.json"))
+        or os.path.exists(os.path.join(path, "tokenizer.json"))
+        or os.path.exists(os.path.join(path, "tokenizer.model"))
+    )
+
+
+def _get_bundled_text_encoder_assets(repo_or_key: str) -> Optional[str]:
+    normalized = _normalize_asset_key(repo_or_key)
+    local_path = TEXT_ENCODER_ASSET_LOCAL_DIRS.get(normalized)
+    if local_path is not None and _has_text_encoder_assets(local_path):
+        return local_path
+    return None
+
+
+def _download_text_encoder_assets(repo_or_key: str) -> str:
+    local_path = _get_bundled_text_encoder_assets(repo_or_key)
+    if local_path is not None:
+        print_acc(f"    using bundled tokenizer/config assets from {local_path}")
+        return local_path
+
+    normalized = _normalize_asset_key(repo_or_key)
+    repo_id = TEXT_ENCODER_ASSET_REPOS.get(normalized, repo_or_key)
+    print_acc(f"    downloading tokenizer/config assets from {repo_id}")
+    return huggingface_hub.snapshot_download(
+        repo_id=repo_id,
+        token=HF_TOKEN,
+        allow_patterns=TEXT_ENCODER_ASSET_ALLOW_PATTERNS,
+        ignore_patterns=TEXT_ENCODER_WEIGHT_IGNORE_PATTERNS,
+    )
+
+
+def _resolve_text_encoder_asset_path(
+    value: Optional[str],
+    default_builtin: str = "qwen3_vl",
+) -> str:
+    if value is None or str(value).strip() == "":
+        return _download_text_encoder_assets(default_builtin)
+
+    value = str(value)
+    normalized = _normalize_asset_key(value)
+    if normalized in TEXT_ENCODER_ASSET_REPOS:
+        return _download_text_encoder_assets(value)
+    return value
+
+
+def _prune_unused_text_encoder_modules(text_encoder: torch.nn.Module):
+    # Ideogram4 only consumes the text/language decoder hidden states. When we
+    # build from config and load a language-only single-file checkpoint, pruning
+    # unused vision modules prevents leftover meta tensors from being moved.
+    for attr in ["visual", "vision_tower", "vision_model"]:
+        if hasattr(text_encoder, attr):
+            setattr(text_encoder, attr, None)
+    if hasattr(text_encoder, "model") and hasattr(text_encoder.model, "vision_tower"):
+        text_encoder.model.vision_tower = None
+    if hasattr(text_encoder, "model") and hasattr(text_encoder.model, "multi_modal_projector"):
+        text_encoder.model.multi_modal_projector = None
+
+
+def _assert_no_meta_tensors(module: torch.nn.Module, context: str):
+    for name, parameter in module.named_parameters():
+        if parameter.is_meta:
+            raise ValueError(f"{context} left meta parameter unloaded: {name}")
+    for name, buffer in module.named_buffers():
+        if buffer.is_meta:
+            raise ValueError(f"{context} left meta buffer unloaded: {name}")
+
+
+def _normalize_qwen_text_encoder_state_dict(
+    state_dict: dict, text_encoder: torch.nn.Module
+) -> dict:
+    """Adapt common single-file Qwen key layouts to Ideogram4's text encoder."""
+    has_language_model = hasattr(text_encoder, "language_model")
+    normalized = {}
+
+    for key, tensor in state_dict.items():
+        if key.startswith("text_encoder."):
+            key = key[len("text_encoder.") :]
+        if key.startswith("base_model."):
+            key = key[len("base_model.") :]
+        if key == "lm_head.weight" or key.startswith("lm_head."):
+            continue
+        if has_language_model and key.startswith("model."):
+            key = "language_model." + key[len("model.") :]
+        if has_language_model and key.startswith("language_model.model."):
+            key = "language_model." + key[len("language_model.model.") :]
+        normalized[key] = tensor
+
+    return normalized
 
 
 def _load_sharded(base, index_path, is_local, prefix="") -> dict:
@@ -177,6 +406,7 @@ class Ideogram4Model(BaseModel):
         self.is_flow_matching = True
         self.is_transformer = True
         self.target_lora_modules = ["Ideogram4Transformer2DModel"]
+        self.supports_model_paths = True
 
         self.patch_size = 2
         self.vae_scale_factor = 8
@@ -197,6 +427,7 @@ class Ideogram4Model(BaseModel):
         self.unconditional_loras: List[LoRASpecialNetwork] = []
         # Legacy single unconditional LoRA reference. Kept for older call sites.
         self.unconditional_lora: Optional[LoRASpecialNetwork] = None
+        self.text_encoder_is_gguf = False
 
     @property
     def text_embedding_space_version(self):
@@ -211,6 +442,26 @@ class Ideogram4Model(BaseModel):
         # 8 for the VAE downsample, 2 for the patch size.
         return self.vae_scale_factor * self.patch_size
 
+    def _get_component_config_path(
+        self, component: str, aliases: List[str]
+    ) -> Optional[str]:
+        direct_path = getattr(self.model_config, f"{component}_path", None)
+        if direct_path:
+            return direct_path
+
+        model_paths = self.model_config.model_paths or {}
+        for key in [component] + aliases:
+            path = model_paths.get(key, None)
+            if path:
+                return path
+
+        model_kwargs = self.model_config.model_kwargs or {}
+        for key in [f"{component}_path"] + [f"{alias}_path" for alias in aliases]:
+            path = model_kwargs.get(key, None)
+            if path:
+                return path
+        return None
+
     # ------------------------------------------------------------------
     # Loading
     # ------------------------------------------------------------------
@@ -219,13 +470,110 @@ class Ideogram4Model(BaseModel):
         # The text encoder is frozen, stock Qwen3-VL-8B-Instruct. The ideogram repo
         # only ships an fp8 copy of it, so load the public bf16 model directly --
         # faster and higher precision than dequantizing the fp8 weights.
-        te_path = self.model_config.model_kwargs.get("text_encoder_path", QWEN3_VL_PATH)
+        model_kwargs = self.model_config.model_kwargs or {}
+        te_path = (
+            model_kwargs.get("text_encoder_path", None)
+            or self.model_config.te_name_or_path
+            or QWEN3_VL_PATH
+        )
+        te_path = str(te_path)
+        is_single_file_te = os.path.isfile(te_path) and te_path.lower().endswith(
+            (".safetensors", ".gguf")
+        )
+        self.text_encoder_is_gguf = os.path.isfile(te_path) and te_path.lower().endswith(
+            ".gguf"
+        )
+        text_encoder_builtin = (
+            model_kwargs.get("text_encoder_builtin", None)
+            or model_kwargs.get("tokenizer_builtin", None)
+            or "qwen3_vl"
+        )
+        te_base_path = model_kwargs.get("text_encoder_base_path", None) or model_kwargs.get(
+            "text_encoder_config_path", None
+        )
+        if is_single_file_te:
+            te_base_path = _resolve_text_encoder_asset_path(
+                te_base_path, default_builtin=text_encoder_builtin
+            )
+        elif te_base_path is None:
+            te_base_path = te_path
+
+        tokenizer_path = model_kwargs.get("text_encoder_tokenizer_path", None) or model_kwargs.get(
+            "tokenizer_path", None
+        )
+        if is_single_file_te:
+            tokenizer_path = _resolve_text_encoder_asset_path(
+                tokenizer_path or te_base_path, default_builtin=text_encoder_builtin
+            )
+        elif tokenizer_path is None:
+            tokenizer_path = te_path
+
+        trust_remote_code = bool(model_kwargs.get("text_encoder_trust_remote_code", False))
         self.print_and_status_update(f"Loading Qwen3-VL text encoder from {te_path}")
 
-        tokenizer = AutoTokenizer.from_pretrained(te_path, token=HF_TOKEN)
-        text_encoder = AutoModel.from_pretrained(
-            te_path, torch_dtype=dtype, token=HF_TOKEN
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path, token=HF_TOKEN, trust_remote_code=trust_remote_code
         )
+        if os.path.isfile(te_path) and te_path.lower().endswith(".safetensors"):
+            self.print_and_status_update(
+                f"  - loading Qwen3-VL config/tokenizer from {te_base_path}"
+            )
+            config = AutoConfig.from_pretrained(
+                te_base_path, token=HF_TOKEN, trust_remote_code=trust_remote_code
+            )
+            with init_empty_weights():
+                text_encoder = AutoModel.from_config(
+                    config, trust_remote_code=trust_remote_code
+                )
+            self.print_and_status_update(f"  - loading local text encoder weights: {te_path}")
+            te_state_dict = load_file(te_path, device="cpu")
+            te_state_dict = _normalize_qwen_text_encoder_state_dict(
+                te_state_dict, text_encoder
+            )
+            for key, tensor in te_state_dict.items():
+                if tensor.is_floating_point():
+                    te_state_dict[key] = tensor.to(dtype)
+            load_result = text_encoder.load_state_dict(
+                te_state_dict, assign=True, strict=False
+            )
+            missing_language_keys = [
+                key
+                for key in load_result.missing_keys
+                if key.startswith("language_model.")
+                and not key.endswith("rotary_emb.inv_freq")
+            ]
+            if missing_language_keys:
+                raise ValueError(
+                    "Text encoder safetensors did not match the Qwen3-VL language "
+                    f"model. First missing key: {missing_language_keys[0]}"
+                )
+            if load_result.unexpected_keys:
+                print_acc(
+                    "    ignored unexpected text encoder keys: "
+                    f"{len(load_result.unexpected_keys)}"
+                )
+            del te_state_dict
+            _prune_unused_text_encoder_modules(text_encoder)
+            _assert_no_meta_tensors(text_encoder, "Text encoder safetensors load")
+        elif os.path.isfile(te_path) and te_path.lower().endswith(".gguf"):
+            self.print_and_status_update(
+                f"  - loading Qwen3-VL config/tokenizer from {te_base_path}"
+            )
+            self.print_and_status_update(f"  - loading local GGUF text encoder: {te_path}")
+            text_encoder = AutoModelForCausalLM.from_pretrained(
+                te_base_path,
+                gguf_file=te_path,
+                torch_dtype=dtype,
+                token=HF_TOKEN,
+                trust_remote_code=trust_remote_code,
+            )
+        else:
+            text_encoder = AutoModel.from_pretrained(
+                te_path,
+                torch_dtype=dtype,
+                token=HF_TOKEN,
+                trust_remote_code=trust_remote_code,
+            )
         flush()
 
         text_encoder.eval()
@@ -241,8 +589,15 @@ class Ideogram4Model(BaseModel):
             transformer = Ideogram4Transformer2DModel(transformer_config)
 
         self.print_and_status_update("  - fetching transformer weights")
+        transformer_path = self._get_component_config_path(
+            "transformer", ["diffusion_model", "dit"]
+        )
         state_dict = _load_component_state_dict(
-            base, "transformer", "diffusion_pytorch_model"
+            base,
+            "transformer",
+            "diffusion_pytorch_model",
+            direct_path=transformer_path,
+            alt_subfolders=["diffusion_models"],
         )
         self.print_and_status_update("  - dequantizing transformer weights")
         state_dict = _dequantize_fp8_state_dict(
@@ -266,7 +621,10 @@ class Ideogram4Model(BaseModel):
     def _load_vae(self, base: str):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading VAE")
-        vae_sd = _load_component_state_dict(base, "vae", "diffusion_pytorch_model")
+        vae_path = self._get_component_config_path("vae", [])
+        vae_sd = _load_component_state_dict(
+            base, "vae", "diffusion_pytorch_model", direct_path=vae_path
+        )
         vae_sd = convert_diffusers_state_dict(vae_sd)
         vae = AutoEncoder(AutoEncoderParams())
         vae.load_state_dict(vae_sd)
@@ -494,12 +852,14 @@ class Ideogram4Model(BaseModel):
         flush()
 
         tokenizer, text_encoder = self._load_text_encoder(base)
-        if self.model_config.quantize_te:
+        if self.model_config.quantize_te and not self.text_encoder_is_gguf:
             self.print_and_status_update("Quantizing Text Encoder")
             text_encoder.to(self.device_torch)
             quantize(text_encoder, weights=get_qtype(self.model_config.qtype_te))
             freeze(text_encoder)
             flush()
+        elif self.model_config.quantize_te and self.text_encoder_is_gguf:
+            self.print_and_status_update("Skipping Quanto text encoder quantization for GGUF")
         if (
             self.model_config.layer_offloading
             and self.model_config.layer_offloading_text_encoder_percent > 0

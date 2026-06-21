@@ -716,6 +716,7 @@ class ModelConfig:
         self.name_or_path: str = kwargs.get('name_or_path', None)
         # name or path is updated on fine tuning. Keep a copy of the original
         self.name_or_path_original: str = self.name_or_path
+        self.arch: ModelArch = kwargs.get("arch", None)
         self.is_v2: bool = kwargs.get('is_v2', False)
         self.is_xl: bool = kwargs.get('is_xl', False)
         self.is_pixart: bool = kwargs.get('is_pixart', False)
@@ -731,7 +732,12 @@ class ModelConfig:
         self.is_vega: bool = kwargs.get('is_vega', False)
         self.is_v_pred: bool = kwargs.get('is_v_pred', False)
         self.dtype: str = kwargs.get('dtype', 'float16')
+        self.transformer_path = kwargs.get('transformer_path', None)
         self.vae_path = kwargs.get('vae_path', None)
+        # kwargs to pass to the model
+        self.model_kwargs = kwargs.get("model_kwargs", {})
+        # model paths for models that support it
+        self.model_paths = kwargs.get("model_paths", {})
         self.refiner_name_or_path = kwargs.get('refiner_name_or_path', None)
         self._original_refiner_name_or_path = self.refiner_name_or_path
         self.refiner_start_at = kwargs.get('refiner_start_at', 0.5)
@@ -754,7 +760,15 @@ class ModelConfig:
 
         self.experimental_xl: bool = kwargs.get('experimental_xl', False)
 
-        if self.name_or_path is None:
+        has_explicit_model_paths = bool(
+            self.transformer_path
+            or self.vae_path
+            or self.model_paths.get("transformer")
+            or self.model_paths.get("diffusion_model")
+            or self.model_paths.get("dit")
+            or self.model_paths.get("vae")
+        )
+        if self.name_or_path is None and not has_explicit_model_paths:
             raise ValueError('name_or_path must be specified')
 
         if self.is_ssd:
@@ -795,8 +809,6 @@ class ModelConfig:
         
         self.te_name_or_path = kwargs.get("te_name_or_path", None)
         
-        self.arch: ModelArch = kwargs.get("arch", None)
-        
         # auto memory management, only for some models
         self.auto_memory = kwargs.get("auto_memory", False)
         # auto memory is deprecated, use layer offloading instead
@@ -826,12 +838,6 @@ class ModelConfig:
 
         # compile the model with torch compile
         self.compile = kwargs.get("compile", False)
-        
-        # kwargs to pass to the model
-        self.model_kwargs = kwargs.get("model_kwargs", {})
-        
-        # model paths for models that support it
-        self.model_paths = kwargs.get("model_paths", {})
         
         self.audio_loss_multiplier = kwargs.get("audio_loss_multiplier", 1.0)
         
