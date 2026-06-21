@@ -7,6 +7,7 @@ sampling pipeline used to render preview images during training.
 
 from __future__ import annotations
 
+import inspect
 import math
 from typing import List, Optional
 
@@ -104,6 +105,33 @@ def unpatchify_latents(z: torch.Tensor, patch_size: int = 2) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
+def _create_qwen_causal_mask(
+    config,
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    text_position_ids: torch.Tensor,
+):
+    """Call Transformers' causal-mask helper across signature changes."""
+    params = inspect.signature(create_causal_mask).parameters
+    kwargs = {
+        "config": config,
+        "attention_mask": attention_mask,
+        "past_key_values": None,
+    }
+
+    if "inputs_embeds" in params:
+        kwargs["inputs_embeds"] = inputs_embeds
+    else:
+        kwargs["input_embeds"] = inputs_embeds
+
+    if "position_ids" in params:
+        kwargs["position_ids"] = text_position_ids
+    if "cache_position" in params:
+        kwargs["cache_position"] = text_position_ids[0]
+
+    return create_causal_mask(**kwargs)
+
+
 @torch.no_grad()
 def get_qwen3_vl_features(
     text_encoder,
@@ -126,12 +154,11 @@ def get_qwen3_vl_features(
     text_position_ids = position_ids_4d[0]
     mrope_position_ids = position_ids_4d[1:]
 
-    causal_mask = create_causal_mask(
-        config=language_model.config,
-        inputs_embeds=inputs_embeds,
-        attention_mask=attention_mask,
-        past_key_values=None,
-        position_ids=text_position_ids,
+    causal_mask = _create_qwen_causal_mask(
+        language_model.config,
+        inputs_embeds,
+        attention_mask,
+        text_position_ids,
     )
     position_embeddings = language_model.rotary_emb(inputs_embeds, mrope_position_ids)
 
@@ -139,12 +166,15 @@ def get_qwen3_vl_features(
     captured: dict[int, torch.Tensor] = {}
     hidden_states = inputs_embeds
     for layer_idx, decoder_layer in enumerate(language_model.layers):
-        hidden_states = decoder_layer(
+        layer_outputs = decoder_layer(
             hidden_states,
             attention_mask=causal_mask,
             position_ids=text_position_ids,
             past_key_values=None,
             position_embeddings=position_embeddings,
+        )
+        hidden_states = (
+            layer_outputs[0] if isinstance(layer_outputs, (tuple, list)) else layer_outputs
         )
         if layer_idx in tap_set:
             captured[layer_idx] = hidden_states
